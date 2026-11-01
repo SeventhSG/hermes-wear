@@ -1,0 +1,16 @@
+name: companion
+label: Hermes Companion
+kind: platform
+version: 1.0.0
+description: >
+  The Hermes Companion Android app as a gateway platform. The app talks to the same /v1/runs API it
+  uses with api_server (runs, SSE events, steer, stop, approvals), but turns run as gateway chats, so
+  approval cards, clarify questions, slash commands and cron/send_message delivery reach the phone.
+author: stormlabs
+optional_env:
+  - name: COMPANION_GATEWAY_PORT
+    description: "Port for the app's run API (default 8797)"
+    password: false
+  - name: COMPANION_HOME_CHANNEL
+    description: "Session id that cron deliver=companion jobs post into (pushed to the phone)"
+    password: false

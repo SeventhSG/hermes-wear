@@ -1,0 +1,15 @@
+[Unit]
+Description=hermes-hub (Hermes Companion relay)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@HUB_DIR@
+EnvironmentFile=@HUB_DIR@/env
+ExecStart=@PYTHON@ @HUB_DIR@/hub.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=@WANTED_BY@

@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""codex-rc [THREAD_ID]: continue a Codex session from Hermes Companion (Codex's answer to /rc).
+
+Makes sure the Codex remote bridge runs, then sends the phone a notification that opens the session
+(this one when run inside Codex, else the most recent) and prints a QR code of the same link.
+"""
+import json
+import os
+import secrets
+import shutil
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+HERMES_HOME = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+ENV = Path(os.environ.get("CODEX_BRIDGE_ENV", str(HERMES_HOME / "secrets/codex-bridge.env")))
+HERMES_ENV = Path(os.environ.get("HERMES_ENV", str(HERMES_HOME / ".env")))
+# The kit installer sets this when it put the units in the user's own systemd instance (no root).
+SYSTEMCTL = ["systemctl", "--user"] if os.environ.get("HERMES_KIT_USER_UNITS") == "1" or (Path.home() / ".config/systemd/user" / "hermes-codex-bridge.service").exists() else ["systemctl"]
+HUB = os.environ.get("HERMES_HUB", "http://127.0.0.1:8791")
+UNIT = "hermes-codex-bridge"
+
+
+def read_env(path):
+    out = {}
+    try:
+        for line in path.read_text().splitlines():
+            key, sep, value = line.partition("=")
+            if sep and not key.strip().startswith("#"):
+                out[key.strip()] = value.strip().strip("'\"")
+    except FileNotFoundError:
+        pass
+    return out
+
+
+def request(url, token, body=None):
+    req = urllib.request.Request(url, data=None if body is None else json.dumps(body).encode(),
+                                 method="GET" if body is None else "POST",
+                                 headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.load(resp)
+
+
+def setup():
+    cfg = read_env(ENV)
+    if not cfg.get("CODEX_BRIDGE_TOKEN"):
+        # All interfaces like the Hermes API (token-protected), so the app's LAN/backup-address failover reaches it too.
+        cfg = {"CODEX_BRIDGE_TOKEN": secrets.token_urlsafe(32), "CODEX_BRIDGE_HOST": "0.0.0.0", "CODEX_BRIDGE_PORT": "8795"}
+        ENV.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        ENV.write_text("".join(f"{k}={v}\n" for k, v in cfg.items()))
+        ENV.chmod(0o600)
+    if subprocess.run(SYSTEMCTL + ["is-active", "--quiet", UNIT]).returncode:
+        subprocess.run(SYSTEMCTL + ["enable", "--now", UNIT], check=True)
+    host = cfg.get("CODEX_BRIDGE_HOST", "127.0.0.1")
+    base = f"http://{'127.0.0.1' if host in ('', '0.0.0.0') else host}:{cfg.get('CODEX_BRIDGE_PORT', '8795')}"
+    for _ in range(30):
+        try:
+            if request(base + "/v1/capabilities", cfg["CODEX_BRIDGE_TOKEN"]).get("connected"):
+                return base, cfg["CODEX_BRIDGE_TOKEN"]
+        except OSError:
+            pass
+        time.sleep(0.5)
+    sys.exit("codex-rc: the bridge is not answering; see journalctl -u " + UNIT)
+
+
+def main():
+    base, token = setup()
+    thread = (sys.argv[1] if len(sys.argv) > 1 else "") or os.environ.get("CODEX_THREAD_ID", "")
+    if not thread:
+        recent = request(base + "/api/sessions?limit=1", token)["data"]
+        if not recent:
+            sys.exit("codex-rc: no Codex sessions yet; start one with `codex`")
+        thread = recent[0]["id"]
+    info = request(base + "/api/sessions/" + thread, token)["session"]
+    name = info["title"] or info["preview"][:80] or "Codex session"
+    link = "hermes://codex/" + thread
+    key = read_env(HERMES_ENV).get("API_SERVER_KEY", "")
+    try:
+        request(HUB.rstrip("/") + "/notify", key, {"title": "Continue in Codex", "body": name, "type": "info",
+                                                   "priority": 4, "url": link})
+        sent = "Tap the notification on your phone to continue there."
+    except OSError as e:
+        sent = f"(no phone notification: {e})"
+    if shutil.which("qrencode") and sys.stdout.isatty():
+        subprocess.run(["qrencode", "-t", "ANSIUTF8", link])
+    print(f"Remote control on: {name}\n{link}\n{sent}")
+
+
+if __name__ == "__main__":
+    main()

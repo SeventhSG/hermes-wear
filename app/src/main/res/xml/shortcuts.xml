@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="voice"
+        android:enabled="true"
+        android:icon="@drawable/ic_voice"
+        android:shortcutShortLabel="@string/shortcut_voice_short"
+        android:shortcutLongLabel="@string/shortcut_voice_long">
+        <intent
+            android:action="cloud.stormlabs.hermescompanion.VOICE"
+            android:targetPackage="com.stormlabs.hermescompanion"
+            android:targetClass="cloud.stormlabs.hermescompanion.MainActivity" />
+    </shortcut>
+
+    <shortcut
+        android:shortcutId="new_chat"
+        android:enabled="true"
+        android:icon="@drawable/ic_new"
+        android:shortcutShortLabel="@string/shortcut_new_short"
+        android:shortcutLongLabel="@string/shortcut_new_long">
+        <intent
+            android:action="cloud.stormlabs.hermescompanion.NEW_CHAT"
+            android:targetPackage="com.stormlabs.hermescompanion"
+            android:targetClass="cloud.stormlabs.hermescompanion.MainActivity" />
+    </shortcut>
+
+    <shortcut
+        android:shortcutId="media"
+        android:enabled="true"
+        android:icon="@drawable/ic_movie"
+        android:shortcutShortLabel="@string/shortcut_media_short"
+        android:shortcutLongLabel="@string/shortcut_media_long">
+        <intent
+            android:action="android.intent.action.MAIN"
+            android:targetPackage="com.stormlabs.hermescompanion"
+            android:targetClass="cloud.stormlabs.hermescompanion.MediaActivity"></intent>
+    </shortcut>
+
+    <shortcut
+        android:shortcutId="status"
+        android:enabled="true"
+        android:icon="@drawable/ic_pulse"
+        android:shortcutShortLabel="@string/shortcut_status_short"
+        android:shortcutLongLabel="@string/shortcut_status_long">
+        <intent
+            android:action="android.intent.action.MAIN"
+            android:targetPackage="com.stormlabs.hermescompanion"
+            android:targetClass="cloud.stormlabs.hermescompanion.StatusActivity"></intent>
+    </shortcut>
+
+    <shortcut
+        android:shortcutId="capture"
+        android:enabled="true"
+        android:icon="@drawable/ic_mic"
+        android:shortcutShortLabel="@string/shortcut_capture_short"
+        android:shortcutLongLabel="@string/shortcut_capture_long">
+        <intent
+            android:action="android.intent.action.MAIN"
+            android:targetPackage="com.stormlabs.hermescompanion"
+            android:targetClass="cloud.stormlabs.hermescompanion.EssentialsActivity">
+            <extra android:name="essentials_record" android:value="true" />
+        </intent>
+    </shortcut>
+</shortcuts>

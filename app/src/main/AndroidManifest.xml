@@ -1,0 +1,390 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
+
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.WRITE_CALENDAR" />
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <uses-permission android:name="android.permission.USE_FINGERPRINT" android:maxSdkVersion="28" />
+
+    <!-- Package visibility: "open <app>" device actions search launcher apps; intents resolved by name. -->
+    <queries>
+        <intent><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent>
+        <intent><action android:name="android.speech.RecognitionService" /></intent>
+        <intent><action android:name="android.intent.action.TTS_SERVICE" /></intent>
+        <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="https" /></intent>
+        <!-- Discover an installed UnifiedPush distributor (e.g. ntfy) to register push with. -->
+        <intent><action android:name="org.unifiedpush.android.distributor.REGISTER" /></intent>
+        <intent><action android:name="android.intent.action.SET_TIMER" /></intent>
+        <intent><action android:name="android.intent.action.SET_ALARM" /></intent>
+        <package android:name="moe.shizuku.privileged.api" />
+        <package android:name="com.whatsapp.w4b" />
+        <package android:name="com.viber.voip" />
+        <package android:name="org.telegram.messenger.web" />
+        <package android:name="org.thunderdog.challegram" />
+        <package android:name="com.whatsapp" />
+        <package android:name="org.telegram.messenger" />
+        <package android:name="org.thoughtcrime.securesms" />
+        <package android:name="com.google.android.apps.messaging" />
+        <package android:name="com.samsung.android.messaging" />
+        <package android:name="com.google.android.gm" />
+    </queries>
+
+    <application
+        android:name=".App"
+        android:enableOnBackInvokedCallback="true"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="Hermes"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:theme="@style/AppTheme"
+        android:usesCleartextTraffic="true">
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:multiprocess="false"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.ASSIST" />
+                <action android:name="android.intent.action.VOICE_COMMAND" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="cloud.stormlabs.hermescompanion.VOICE" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="cloud.stormlabs.hermescompanion.NEW_CHAT" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <!-- Deep links from hub push notifications: hermes://session/<id>, hermes://job/<id>. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="hermes" />
+            </intent-filter>
+            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
+        </activity>
+
+        <!-- One-shot ADB setup helper. It disables itself immediately after provisioning. -->
+        <activity
+            android:name=".ProvisionActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:permission="android.permission.DUMP"
+            android:noHistory="true" />
+
+        <activity
+            android:name=".CrashActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:theme="@style/AppTheme" />
+
+<activity
+    android:name=".ChatActivity"
+    android:exported="false"
+    android:launchMode="singleTop"
+    android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode"
+    android:windowSoftInputMode="adjustResize|stateAlwaysHidden" />
+
+<!-- Layout homes (Settings › Appearance › Layout): Tabs' conversation list, the Dashboard. -->
+<activity android:name=".ChatsActivity" android:exported="false" android:windowSoftInputMode="adjustResize|stateAlwaysHidden" />
+<activity android:name=".DashboardActivity" android:exported="false" android:windowSoftInputMode="adjustResize|stateAlwaysHidden" />
+<activity android:name=".CatalogActivity" android:exported="false" android:windowSoftInputMode="adjustResize" />
+<activity android:name=".JobsActivity" android:exported="false" android:windowSoftInputMode="adjustResize" />
+<activity android:name=".StatusActivity" android:exported="false" />
+        <activity android:name=".MediaActivity" android:exported="false" android:windowSoftInputMode="adjustResize" />
+        <activity android:name=".ModulesActivity" android:exported="false" />
+        <activity android:name=".TerminalActivity" android:exported="false" android:windowSoftInputMode="adjustResize|stateHidden" android:configChanges="orientation|screenSize|keyboardHidden|keyboard|smallestScreenSize|screenLayout|uiMode" />
+        <activity android:name=".MediaDetailActivity" android:exported="false" />
+        <receiver android:name=".ShotReceiver" android:exported="true" android:permission="android.permission.DUMP" />
+<activity android:name=".OpsActivity" android:exported="false" android:theme="@android:style/Theme.NoDisplay" />
+<activity android:name=".HomeActivity" android:exported="false" android:windowSoftInputMode="adjustResize" />
+<receiver android:name=".PresenceReceiver" android:exported="false">
+    <intent-filter><action android:name="android.intent.action.BOOT_COMPLETED" /></intent-filter>
+    <intent-filter><action android:name="android.intent.action.MY_PACKAGE_REPLACED" /></intent-filter>
+</receiver>
+
+<!-- "Ask Hermes" from any app: text selection menu, share sheet (text + images). -->
+<activity
+    android:name=".AskActivity"
+    android:exported="true"
+    android:excludeFromRecents="true"
+    android:label="Ask Hermes"
+    android:windowSoftInputMode="adjustResize|stateHidden"
+    android:theme="@style/TranslucentMotion">
+    <intent-filter android:label="Ask Hermes">
+        <action android:name="android.intent.action.PROCESS_TEXT" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <data android:mimeType="text/plain" />
+    </intent-filter>
+    <intent-filter android:label="Ask Hermes">
+        <action android:name="android.intent.action.SEND" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <data android:mimeType="text/plain" />
+        <data android:mimeType="image/*" />
+    </intent-filter>
+    <intent-filter android:label="Ask Hermes">
+        <action android:name="android.intent.action.SEND_MULTIPLE" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <data android:mimeType="image/*" />
+    </intent-filter>
+</activity>
+
+<service
+    android:name=".RunService"
+    android:exported="false"
+    android:foregroundServiceType="dataSync" />
+
+<!-- Always-on "Hermes" wake word (Settings > Voice); on-device keyword spotting. -->
+<!-- Required for the assistant role to activate HermesVoiceInteractionService (see voice_interaction_service.xml). -->
+<service android:name=".HermesRecognitionService" android:exported="true">
+    <intent-filter><action android:name="android.speech.RecognitionService" /></intent-filter>
+    <meta-data android:name="android.speech" android:resource="@xml/recognition_service" />
+</service>
+<service android:name=".WakeWordService" android:exported="false" android:foregroundServiceType="microphone" />
+    <service android:name=".LectureService" android:exported="false" android:foregroundServiceType="microphone" />
+    <activity android:name=".LiveNotesActivity" android:exported="false" android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode" android:launchMode="singleTop" android:windowSoftInputMode="adjustResize" />
+<receiver android:name=".RunActionReceiver" android:exported="false" />
+<receiver android:name=".PhoneCommand$Receiver" android:exported="false" />
+        <activity android:name=".IncomingCallActivity" android:exported="false" android:theme="@android:style/Theme.NoDisplay" android:excludeFromRecents="true" />
+        <receiver android:name=".IncomingCall$Decline" android:exported="false" />
+<receiver android:name=".ReplyDraftReceiver" android:exported="false" />
+<service
+    android:name=".ReplyListenerService"
+    android:exported="true"
+    android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+    <intent-filter>
+        <action android:name="android.service.notification.NotificationListenerService" />
+    </intent-filter>
+</service>
+<service
+    android:name=".HermesAccessibilityService"
+    android:exported="true"
+    android:label="Hermes screen control"
+    android:description="@string/screen_control_description"
+    android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+    <intent-filter><action android:name="android.accessibilityservice.AccessibilityService" /></intent-filter>
+    <meta-data android:name="android.accessibilityservice" android:resource="@xml/hermes_accessibility_service" />
+</service>
+
+<!-- UnifiedPush connector: the distributor (e.g. ntfy) calls back on these actions. -->
+<receiver android:name=".PushReceiver" android:exported="true">
+    <intent-filter>
+        <action android:name="org.unifiedpush.android.connector.NEW_ENDPOINT" />
+        <action android:name="org.unifiedpush.android.connector.MESSAGE" />
+        <action android:name="org.unifiedpush.android.connector.UNREGISTERED" />
+        <action android:name="org.unifiedpush.android.connector.REGISTRATION_FAILED" />
+    </intent-filter>
+</receiver>
+
+<!-- Fallback polling for hub events when no UnifiedPush distributor is installed. -->
+<service
+    android:name=".PushPoller"
+    android:exported="false"
+    android:permission="android.permission.BIND_JOB_SERVICE" />
+
+<!-- The capture lane: reachable without going through a chat session. -->
+<activity
+    android:name=".EssentialsActivity"
+    android:exported="false"
+    android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode"
+    android:windowSoftInputMode="adjustResize" />
+
+<!-- First-run tour: launched by MainActivity on a fresh install; replay from Settings. -->
+<activity android:name=".OnboardingActivity" android:exported="false" />
+
+<!-- First-run connection setup: launched by MainActivity when no API key is stored. -->
+<activity
+    android:name=".ConnectionActivity"
+    android:exported="false"
+    android:launchMode="singleTop"
+    android:windowSoftInputMode="adjustResize" />
+
+<!-- Share-sheet target: shared content is previewed for confirmation before upload. -->
+<activity
+    android:name=".ShareActivity"
+    android:exported="true"
+    android:excludeFromRecents="true"
+    android:noHistory="true"
+    android:launchMode="singleTop">
+    <intent-filter>
+        <action android:name="android.intent.action.SEND" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <data android:mimeType="text/plain" />
+        <data android:mimeType="image/*" />
+        <data android:mimeType="audio/*" />
+        <data android:mimeType="video/*" />
+        <data android:mimeType="application/*" />
+    </intent-filter>
+    <intent-filter>
+        <action android:name="android.intent.action.SEND_MULTIPLE" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <data android:mimeType="image/*" />
+        <data android:mimeType="audio/*" />
+        <data android:mimeType="video/*" />
+        <data android:mimeType="application/*" />
+    </intent-filter>
+</activity>
+
+<!-- Home-screen widget: one tap to record, one tap to type. -->
+<receiver
+    android:name=".CaptureWidgetProvider"
+    android:exported="true"
+    android:label="Capture">
+    <intent-filter>
+        <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+    </intent-filter>
+    <meta-data
+        android:name="android.appwidget.provider"
+        android:resource="@xml/capture_widget_info" />
+</receiver>
+
+<!-- Hermes: last reply, health, needs-you, quick actions. -->
+<receiver
+    android:name=".HermesWidgetProvider"
+    android:exported="true"
+    android:label="Hermes">
+    <intent-filter>
+        <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+    </intent-filter>
+    <meta-data
+        android:name="android.appwidget.provider"
+        android:resource="@xml/hermes_widget_info" />
+</receiver>
+
+<!-- Homelab status: home-screen widget + quick-settings tile, both fed by the hub's /ops/summary. -->
+<receiver
+    android:name=".MediaWidgetProvider"
+    android:exported="true"
+    android:label="Media">
+    <intent-filter>
+        <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+    </intent-filter>
+    <meta-data
+        android:name="android.appwidget.provider"
+        android:resource="@xml/media_widget_info" />
+</receiver>
+<receiver
+    android:name=".LabWidgetProvider"
+    android:exported="true"
+    android:label="Homelab">
+    <intent-filter>
+        <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+    </intent-filter>
+    <meta-data
+        android:name="android.appwidget.provider"
+        android:resource="@xml/lab_widget_info" />
+</receiver>
+<service
+    android:name=".LabTileService"
+    android:exported="true"
+    android:icon="@drawable/ic_server"
+    android:label="Homelab"
+    android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+    <intent-filter>
+        <action android:name="android.service.quicksettings.action.QS_TILE" />
+    </intent-filter>
+</service>
+
+<!-- Quick-settings tile. Distinct from the "Ask Hermes" tile: filing, not asking. -->
+<service
+    android:name=".CaptureTileService"
+    android:exported="true"
+    android:icon="@drawable/ic_mic"
+    android:label="Capture"
+    android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+    <intent-filter>
+        <action android:name="android.service.quicksettings.action.QS_TILE" />
+    </intent-filter>
+</service>
+<service
+    android:name=".PauseTileService"
+    android:exported="true"
+    android:icon="@drawable/ic_stop"
+    android:label="Pause Hermes"
+    android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+    <intent-filter>
+        <action android:name="android.service.quicksettings.action.QS_TILE" />
+    </intent-filter>
+</service>
+
+<activity
+    android:name=".SettingsActivity"
+    android:exported="false"
+    android:windowSoftInputMode="adjustResize" />
+
+<activity android:name=".PermissionCentreActivity" android:exported="false" />
+<activity android:name=".ScreenStepConfirmActivity" android:exported="false" android:theme="@style/TranslucentMotion" />
+
+<activity
+    android:name=".ToolDetailActivity"
+    android:exported="false" />
+
+        <service
+            android:name=".AssistantTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_mic"
+            android:label="Ask Hermes"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter><action android:name="android.service.quicksettings.action.QS_TILE" /></intent-filter>
+        </service>
+
+        <service
+            android:name=".HermesVoiceInteractionService"
+            android:exported="true"
+            android:label="Hermes"
+            android:permission="android.permission.BIND_VOICE_INTERACTION">
+            <meta-data android:name="android.voice_interaction" android:resource="@xml/voice_interaction_service" />
+            <intent-filter><action android:name="android.service.voice.VoiceInteractionService" /></intent-filter>
+        </service>
+
+        <service
+            android:name=".HermesVoiceSessionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_VOICE_INTERACTION" />
+
+
+<!-- Firebase Cloud Messaging: data-only events from hermes-hub (FcmService). -->
+<service android:name=".FcmService" android:exported="false">
+    <intent-filter><action android:name="com.google.firebase.MESSAGING_EVENT" /></intent-filter>
+</service>
+<activity android:name=".FileViewerActivity" android:exported="false" android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize" />
+<activity android:name=".MediaViewerActivity" android:exported="false" android:theme="@style/MediaViewer" android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density" />
+<provider android:name=".PdfProvider" android:authorities="${applicationId}.pdf" android:exported="false" android:grantUriPermissions="true" />
+    </application>
+</manifest>
