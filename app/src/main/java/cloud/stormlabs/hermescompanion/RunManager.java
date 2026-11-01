@@ -234,10 +234,28 @@ public final class RunManager {
     }
 
     public void steer(LiveRun run, String text, java.util.function.Consumer<HermesApi.Result> done) {
+        HermesApi.Approval q = run.approval;
+        if (q != null && q.clarify) { answer(run, text, done); return; }   // a typed reply answers the pending question
         streams.submit(() -> {
             HermesApi.Result r = run.runId == null ? HermesApi.Result.error("The run is still starting") : run.api.steerRun(run.runId, text);
             if (r.ok) synchronized (run) { run.addSteer(text); }
             main.post(() -> { if (done != null) done.accept(r); });
+        });
+    }
+
+    /** Answers the pending clarify question (a typed reply, one choice, or a JSON array of choices). */
+    public void answer(LiveRun run, String answer, java.util.function.Consumer<HermesApi.Result> done) {
+        HermesApi.Approval q = run.approval;
+        String runId = q != null && !q.runId.isEmpty() ? q.runId : run.runId;
+        streams.submit(() -> {
+            HermesApi.Result r = runId == null || q == null ? HermesApi.Result.error("No question to answer") : run.api.clarifyRun(runId, answer, q.requestId, q.generation);
+            if (r.ok) synchronized (run) { if (run.approval == q) run.approval = null; run.addSteer(answer.startsWith("[") ? answer.replaceAll("[\\[\\]\"]", "").replace(",", ", ") : answer); }
+            main.post(() -> {
+                Notifier.cancelApproval(app, run.profileId, run.sessionId);
+                HermesWidgetProvider.update(app);
+                if (done != null) done.accept(r);
+                notifyObservers(run, UPDATE_TOOL);
+            });
         });
     }
 

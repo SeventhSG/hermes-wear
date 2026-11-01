@@ -107,9 +107,11 @@ public class HermesApi implements AgentBackend {
         public static Result error(String text) { return new Result(false, text); }
     }
 
-    /** A dangerous-command approval the agent is blocked on (approval.request). */
+    /** A dangerous-command approval (approval.request) or a question (clarify.request) the agent is blocked on. */
     public static final class Approval {
         public final String runId, command, description, requestId;
+        /** A clarify question: {@link #description} is the question, {@link #choices} its options (may be empty: type the answer). */
+        public boolean clarify, multi;
         /** Hermes 0.22+ durable runs: the turn generation the answer must name (-1 = not sent, answer without it). */
         public final int generation;
         public final List<String> choices = new ArrayList<>();
@@ -133,6 +135,17 @@ public class HermesApi implements AgentBackend {
             if (id.isEmpty()) id = clean(o.optString("prompt_id", ""));   // durable runs call the id prompt_id
             return new Approval(o.optString("run_id", fallbackRunId), clean(o.optString("command", "")),
                     clean(o.optString("description", "")), id, choices, o.optInt("execution_generation", -1));
+        }
+        static Approval question(String fallbackRunId, JSONObject o) {
+            List<String> choices = new ArrayList<>();
+            JSONArray c = o.optJSONArray("choices");
+            if (c != null) for (int i = 0; i < c.length(); i++) { String v = clean(c.optString(i, "")); if (!v.isEmpty()) choices.add(v); }
+            String id = clean(o.optString("prompt_id", ""));
+            if (id.isEmpty()) id = clean(o.optString("request_id", ""));
+            Approval q = new Approval(o.optString("run_id", fallbackRunId), "", clean(o.optString("question", "")), id, null, o.optInt("execution_generation", -1));
+            q.choices.clear(); q.choices.addAll(choices);
+            q.clarify = true; q.multi = o.optBoolean("multi_select", false) && !choices.isEmpty();
+            return q;
         }
         public static String label(String choice) {
             switch (choice) {
@@ -823,7 +836,8 @@ public class HermesApi implements AgentBackend {
                     return false;
                 }
                 case "approval.request": listener.onApproval(Approval.parse(runId, o)); return false;
-                case "approval.resolved": listener.onApproval(null); return false; // answered elsewhere (the terminal)
+                case "clarify.request": listener.onApproval(Approval.question(runId, o)); return false;
+                case "approval.resolved": case "clarify.resolved": case "clarify.settled": listener.onApproval(null); return false; // answered (maybe elsewhere) or expired
                 case "assistant.completed": finalText = o.optString("content", finalText); return false;
                 default:
                     if (name.startsWith("tool.")) {
@@ -907,6 +921,12 @@ public class HermesApi implements AgentBackend {
                                     break;
                                 case "approval.request":
                                     listener.onApproval(Approval.parse(runId, o));
+                                    break;
+                                case "clarify.request":
+                                    listener.onApproval(Approval.question(runId, o));
+                                    break;
+                                case "clarify.resolved": case "clarify.settled":
+                                    listener.onApproval(null);
                                     break;
                                 case "assistant.completed":
                                     finalText = o.optString("content", finalText);
@@ -1013,6 +1033,16 @@ public class HermesApi implements AgentBackend {
             if (generation >= 0) body.put("execution_generation", generation);   // durable runs refuse a body without it
             JSONObject o = requestJson("POST", runUrl(runId, "/approval"), body);
             return Result.ok("deny".equals(o.optString("choice", choice)) ? "Denied" : "Approved");
+        } catch (Exception e) { return Result.error(friendly(e)); }
+    }
+
+    /** Answers a clarify question; a multi-select answer is a JSON array of the chosen labels, as a string. */
+    public Result clarifyRun(String runId, String answer, String requestId, int generation) {
+        try {
+            JSONObject body = new JSONObject().put("answer", answer).put("request_id", requestId == null ? "" : requestId);
+            if (generation >= 0) body.put("execution_generation", generation);   // durable runs take exactly these three keys
+            requestJson("POST", runUrl(runId, "/clarify"), body);
+            return Result.ok("Answered");
         } catch (Exception e) { return Result.error(friendly(e)); }
     }
 

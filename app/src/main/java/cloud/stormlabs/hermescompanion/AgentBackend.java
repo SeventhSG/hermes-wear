@@ -35,6 +35,7 @@ public interface AgentBackend {
     HermesApi.Result approveRun(String id, String choice, String requestId);
     /** Hermes durable runs also need the turn generation; the bridges ignore it. */
     default HermesApi.Result approveRun(String id, String choice, String requestId, int generation) { return approveRun(id, choice, requestId); }
+    default HermesApi.Result clarifyRun(String id, String answer, String requestId, int generation) { return HermesApi.Result.error("This server can't take answers to questions"); }
     List<HermesApi.ModelOption> modelOptions() throws Exception;
     HermesApi.Result setSessionModel(String id, String provider, String model);
     byte[] fetchBytes(String url, int maxBytes) throws Exception;

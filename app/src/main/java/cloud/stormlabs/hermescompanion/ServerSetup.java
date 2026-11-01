@@ -29,7 +29,8 @@ final class ServerSetup {
     /** True when a hub already answers at the configured hub URL (off the UI thread). */
     static boolean hubUp(SettingsStore store) { return new HubApi(store.hubUrl(), store.hubKey()).health().ok; }
 
-    /** Lets the user choose the modules, then opens a "Server setup" chat in which Hermes installs them; {@code opened} runs once the chat starts. */
+    /** Opens a "Server setup" chat: Hermes interviews the user about what applies to them (default), or installs the modules
+     *  the user ticks; {@code opened} runs once the chat starts. */
     static void offer(Activity a, SettingsStore store, Runnable opened) {
         String host = host(store.endpoint());
         KitModules kit;
@@ -41,16 +42,20 @@ final class ServerSetup {
             boolean update = hubUp(store);
             a.runOnUiThread(() -> {
                 if (a.isFinishing() || a.isDestroyed()) return;
-                Sheets.kitModules(a, kit, initial, host, update, chosen -> {
-                    java.util.Set<String> picked = kit.normalize(chosen);
-                    store.kitModules(KitModules.toCsv(picked));
-                    start(a, store, host, kit, picked, update, opened);
-                });
+                Sheets.actions(a, update ? "Update the server pack" : "Set up your server", "Hermes does the work in a chat and asks before changing anything.",
+                        Sheets.Item.of(R.drawable.ic_settings, Ui.BLUE, "Set it up with Hermes", "Hermes checks your server and asks what you want, one question at a time",
+                                () -> start(a, store, host, (token, port) -> guided(token, port, update), opened)),
+                        Sheets.Item.of(R.drawable.ic_file, Ui.BLUE_DARK, "Choose modules myself", "Tick the modules, Hermes installs exactly those",
+                                () -> Sheets.kitModules(a, kit, initial, host, update, chosen -> {
+                                    java.util.Set<String> picked = kit.normalize(chosen);
+                                    store.kitModules(KitModules.toCsv(picked));
+                                    start(a, store, host, (token, port) -> prompt(token, port, kit, picked, update), opened);
+                                })));
             });
         }, "server-setup-probe").start();
     }
 
-    private static void start(Activity a, SettingsStore store, String host, KitModules kit, java.util.Set<String> picked, boolean update, Runnable opened) {
+    private static void start(Activity a, SettingsStore store, String host, java.util.function.BiFunction<String, Integer, String> prompt, Runnable opened) {
         Toast.makeText(a, "Starting server setup…", Toast.LENGTH_SHORT).show();
         Context app = a.getApplicationContext();
         new Thread(() -> {
@@ -63,7 +68,7 @@ final class ServerSetup {
                     a.startActivity(new Intent(a, MainActivity.class)
                             .putExtra(MainActivity.EXTRA_SESSION, s.id)
                             .putExtra(ChatActivity.EXTRA_TITLE, "Server setup")
-                            .putExtra(ChatActivity.EXTRA_PROMPT, prompt(token, port, kit, picked, update))
+                            .putExtra(ChatActivity.EXTRA_PROMPT, prompt.apply(token, port))
                             .putExtra(ChatActivity.EXTRA_AUTOSEND, true)
                             .putExtra(MainActivity.EXTRA_PROFILE_SECRET, store.intentSecret())
                             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
@@ -81,7 +86,26 @@ final class ServerSetup {
         boolean voice = kit.needsVoiceDownloads(picked);
         return (update ? "Please update the Hermes Companion server kit on this server" : "Please install the Hermes Companion server kit on this server")
                 + " with exactly the modules I chose in the app: " + kit.names(picked) + ".\n\n"
-                + "1. Receive the kit from my phone. Run this as one command; it waits up to 3 minutes for the app to upload the kit, "
+                + "1. " + receive(token, port)
+                + "2. Unzip /tmp/hermes-companion-kit.zip into a new temporary folder. It holds server-kit/ (the installer, with a README.md) and bridge/. "
+                + "Work inside server-kit/. The installer is install.py (standard library only).\n"
+                + "3. Preview first. Run `python3 install.py " + args + " --dry-run --yes` (add `--user` if you are not root and cannot use sudo; "
+                + "use sudo if you are not root but can) and show me the summary: what it would create or change and anything it reports under Checks. "
+                + "Stop and tell me if a check is an error.\n"
+                + "4. When I say go ahead, run the same command without `--dry-run`. It backs up any file that exists and differs, keeps my edits to skills, "
+                + "and restarts a service only when its own files changed. Do not edit the kit's files or add options I did not ask for"
+                + (voice ? " — except ask me whether to add `--with-deps` (it creates Python environments and downloads packages), `--download-models` (about 450 MB of voices) and `--stt-device gpu` if I have an NVIDIA GPU" : "") + ".\n"
+                + "5. If it prints \"Left for you\", do those steps or tell me exactly what remains (for example registering the phone MCP server). "
+                + (picked.contains("proxmox") ? "For the Proxmox module ask me for the host as user@host and a read-only SSH key path, then pass `--pve-ssh` and `--pve-key`. " : "")
+                + "Ask me for the push relay URL and key only if I mention them; pass them with `--set HERMES_RELAY_URL=... --set HERMES_RELAY_KEY=...`.\n"
+                + "6. Run `python3 install.py verify` and check that port 8791 is reachable from my phone's network; change the firewall only if I agree.\n"
+                + "7. Delete the temporary files, then give me a short summary of what was installed and anything left for me to do.\n\n"
+                + "If a command fails, show me the error and stop instead of working around it.";
+    }
+
+    /** Step 1 of both prompts: a one-shot receiver the app uploads the bundled kit to. */
+    private static String receive(String token, int port) {
+        return "Receive the kit from my phone. Run this as one command; it waits up to 3 minutes for the app to upload the kit, "
                 + "then exits. The app keeps retrying for 12 minutes, so if it times out just run it again:\n\n"
                 + "```bash\n"
                 + "timeout 170 python3 - <<'PY'\n"
@@ -98,21 +122,49 @@ final class ServerSetup {
                 + "while not done: srv.handle_request()\n"
                 + "print('received', OUT)\n"
                 + "PY\n"
-                + "```\n\n"
-                + "2. Unzip /tmp/hermes-companion-kit.zip into a new temporary folder. It holds server-kit/ (the installer, with a README.md) and bridge/. "
-                + "Work inside server-kit/. The installer is install.py (standard library only).\n"
-                + "3. Preview first. Run `python3 install.py " + args + " --dry-run --yes` (add `--user` if you are not root and cannot use sudo; "
-                + "use sudo if you are not root but can) and show me the summary: what it would create or change and anything it reports under Checks. "
-                + "Stop and tell me if a check is an error.\n"
-                + "4. When I say go ahead, run the same command without `--dry-run`. It backs up any file that exists and differs, keeps my edits to skills, "
-                + "and restarts a service only when its own files changed. Do not edit the kit's files or add options I did not ask for"
-                + (voice ? " — except ask me whether to add `--with-deps` (it creates Python environments and downloads packages), `--download-models` (about 450 MB of voices) and `--stt-device gpu` if I have an NVIDIA GPU" : "") + ".\n"
-                + "5. If it prints \"Left for you\", do those steps or tell me exactly what remains (for example registering the phone MCP server). "
-                + (picked.contains("proxmox") ? "For the Proxmox module ask me for the host as user@host and a read-only SSH key path, then pass `--pve-ssh` and `--pve-key`. " : "")
-                + "Ask me for the push relay URL and key only if I mention them; pass them with `--set HERMES_RELAY_URL=... --set HERMES_RELAY_KEY=...`.\n"
-                + "6. Run `python3 install.py verify` and check that port 8791 is reachable from my phone's network; change the firewall only if I agree.\n"
-                + "7. Delete the temporary files, then give me a short summary of what was installed and anything left for me to do.\n\n"
-                + "If a command fails, show me the error and stop instead of working around it.";
+                + "```\n\n";
+    }
+
+    /** The guided setup: Hermes surveys the server itself, asks only what it can't find out, then installs what applies. */
+    static String guided(String token, int port, boolean update) {
+        return "Please " + (update ? "update" : "set up") + " the Hermes Companion server kit on this server for me, as a guided setup. "
+                + "You do the work; I only answer questions and approve changes.\n\n"
+                + "How to ask me things: use the clarify tool, one question per call, with 2 to 5 short choices whenever the answer is one "
+                + "of a few options (multi-select when several can apply). Put a one-line explanation of what each option means in the "
+                + "question itself (what it does, what it needs, roughly how much disk, RAM or download). Never ask what you can find out "
+                + "yourself, never ask for passwords or keys in chat (ask for a file path instead), and skip questions that don't apply to "
+                + "this server. If you have no clarify tool, ask the same question as a short numbered list and wait for my reply.\n\n"
+                + "1. " + receive(token, port)
+                + "If the upload never arrives after two tries (for example my phone reaches you through a public URL that doesn't pass "
+                + "that port), tell me and ask whether to download the same kit from https://github.com/storm546/hermes-companion-app instead.\n"
+                + "2. Unzip it into a new temporary folder and work inside server-kit/. Read README.md, then run `python3 install.py list --json`: "
+                + "it and the README are the source of truth for the modules, what each needs and how to install it (the dry run in step 5 checks prerequisites).\n"
+                + "3. Look around before asking, read-only: OS, whether you are root or can sudo, systemd, an NVIDIA GPU (nvidia-smi), "
+                + "Tailscale, the firewall, which agent CLIs exist (codex, claude), Proxmox (pveversion, or an SSH alias), and media "
+                + "servers already running (Jellyfin, Emby, Plex, Sonarr, Radarr, Prowlarr: docker ps, listening ports). "
+                + (update ? "Also run `python3 install.py status --json` to see what is installed now and keep those modules unless I say otherwise. " : "")
+                + "Change nothing yet.\n"
+                + "4. Interview me, one topic at a time, only about what applies. The hub is always installed (push, the System screen, "
+                + "files). Then ask: which skills I want (multi-select); phone actions from other chats (phone-mcp); app chats as gateway "
+                + "chats so risky commands and questions show as cards (gateway-platform, recommended); slash commands; Codex or Claude Code "
+                + "from the phone (only if their CLI is here, or ask if I plan to install one); Proxmox (only if you found one; then ask for "
+                + "user@host and a read-only SSH key path); voice servers (none, speech-to-text, text-to-speech, or both; GPU or CPU; say "
+                + "they need --with-deps and about 450 MB of models); media (if you found media servers, tell me which and that I connect "
+                + "them in the app under Settings, Modules, Media once the hub runs; the kit installs nothing for media). Respect a no: "
+                + "never install something I declined.\n"
+                + "5. Sum up the plan in a short list, run `python3 install.py <your options> --dry-run --yes` (add `--user` if you are not "
+                + "root and cannot sudo; use sudo if you can) and show me what it would change and any check that is an error. Then ask with "
+                + "clarify: Install, Change something, or Cancel.\n"
+                + "6. On Install, run the same command without --dry-run. It backs up what it replaces and keeps my edits. Do the steps it "
+                + "prints under \"Left for you\", except restarting hermes-gateway: that ends this chat, so it comes last (step 8).\n"
+                + "7. Run `python3 install.py verify`, check that port 8791 answers from my phone's network (change the firewall only if I "
+                + "agree), delete the temporary files, and give me a short summary: what is installed, what I should switch on in the app "
+                + "(Settings, Modules), and anything left for me.\n"
+                + "8. If a gateway restart is needed, say so in the summary, then schedule it so this reply finishes first: "
+                + "`systemd-run --on-active=10 systemctl restart hermes-gateway` (or tell me the command if you can't). The app reconnects "
+                + "on its own within a minute.\n\n"
+                + "If a command fails, show me the error and ask what to do (Retry, Skip this module, Stop) instead of working around it. "
+                + "Don't edit the kit's files or install anything it doesn't include.";
     }
 
     /** Polls the receiver until it listens, then uploads the kit once (12 minutes at most, on its own thread). */

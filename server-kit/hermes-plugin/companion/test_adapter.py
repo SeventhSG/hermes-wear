@@ -191,6 +191,21 @@ class CompanionTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn(cards[0], ev[-1]["output"])
             self.assertEqual(ev[-1]["output"].count("MEDIA:"), 1)   # final text is the model's; the card is appended
 
+    async def test_clarify_is_a_card_answered_through_the_gateway(self):
+        rid = await self.start(input="slow job")
+        await asyncio.sleep(0.05)
+        resolved = []
+        with mock.patch("tools.clarify_gateway.get_pending", lambda cid: SimpleNamespace(multi_select=True)), \
+                mock.patch("tools.clarify_gateway.resolve_gateway_clarify", lambda cid, a: resolved.append((cid, a)) or True):
+            await self.a.send_clarify("S1", "Which modules?", ["Voice", "Media"], "c9", "agent:main:companion:dm:S1")
+            async with self.http.post(f"/v1/runs/{rid}/clarify", json={"request_id": "c9", "answer": '["Voice"]'}) as r:
+                self.assertEqual(r.status, 200, await r.text())
+        ev = await self.events(rid)
+        q = next(e for e in ev if e["event"] == "clarify.request")
+        self.assertEqual((q["prompt_id"], q["question"], q["choices"], q["multi_select"]), ("c9", "Which modules?", ["Voice", "Media"], True))
+        self.assertIn("clarify.resolved", [e["event"] for e in ev])
+        self.assertEqual(resolved, [("c9", '["Voice"]')])
+
     async def test_auth_and_busy(self):
         async with aiohttp.ClientSession() as s:
             async with s.post(f"http://127.0.0.1:{self.port}/v1/runs", json={"session_id": "S1", "input": "x"}) as r:

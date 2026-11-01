@@ -212,6 +212,20 @@ final class Notifier {
     static void approval(Context c, RunManager.LiveRun run) {
         HermesApi.Approval a = run.approval;
         if (a == null) return;
+        if (a.clarify) {
+            StringBuilder body = new StringBuilder(a.description);
+            for (int i = 0; i < a.choices.size(); i++) body.append(i == 0 ? "\n\n" : "\n").append(i + 1).append(". ").append(a.choices.get(i));
+            Notification.Builder q = builder(c, CH_APPROVALS)
+                    .setContentTitle("Hermes asks · " + run.sessionTitle)
+                    .setContentText(a.description)
+                    .setStyle(new Notification.BigTextStyle().bigText(body))
+                    .setCategory(Notification.CATEGORY_REMINDER)
+                    .setAutoCancel(true)
+                    .setContentIntent(openChat(c, run.profileId, run.sessionId, run.sessionTitle));
+            if (Build.VERSION.SDK_INT < 26) q.setPriority(Notification.PRIORITY_HIGH);
+            post(c, approvalTag(run.profileId, run.sessionId), ID_APPROVAL, q.build());
+            return;
+        }
         String cmd = a.command.isEmpty() ? a.description : a.command;
         Notification.Builder b = builder(c, CH_APPROVALS)
                 .setContentTitle("Approve command? · " + run.sessionTitle)

@@ -209,7 +209,7 @@ public final class SettingsActivity extends Activity {
                 "Turns run like Telegram chats: risky commands and code ask you instead of being blocked, Hermes can ask questions, cron results reach the phone. Falls back to the API when the gateway is out of reach",
                 store.useGateway(), checked -> store.useGateway(checked));
         if (hermes) addRow(advServer, R.drawable.ic_server, 0xff318f88, "Server pack",
-                "Choose which modules Hermes installs or updates: hub, skills, voice servers and more", true, v -> ServerSetup.offer(this, store, null));
+                "Hermes sets up or updates the server side with you, or you pick the modules yourself", true, v -> ServerSetup.offer(this, store, null));
         addRow(advServer, R.drawable.ic_pulse, 0xff916239, "Daily token budget",
                 store.dailyTokenBudget() == 0 ? "Off" : store.dailyTokenBudget() + " tokens · warning in System", false,
                 v -> Sheets.input(this, "Daily token budget", "0 turns off the local System warning", String.valueOf(store.dailyTokenBudget()), "Tokens", value -> {

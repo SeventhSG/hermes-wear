@@ -335,15 +335,15 @@ public final class OnboardingActivity extends Activity {
                 box.removeAllViews();
                 if (up) { rows(box, new String[][]{{"pulse", "hermes-hub is running", "Push, the System screen and file delivery are ready."}}); return; }
                 rows(box, new String[][]{
-                        {"server", "Set up the rest on your server", "Hermes can install the server pack for you:"},
+                        {"server", "Set up the rest on your server", "Hermes looks at your server, asks what you want and installs only that:"},
                         {"notification", "hermes-hub", "Push notifications, the System screen, homelab status and files in chat."},
                         {"send", "hermes-notify", "A command that lets scripts and jobs notify this phone."},
                         {"skills", "Companion skills", "Ten skills: phone agent, reminders, read-later, receipts, homelab and more. Pick only the ones you want."},
-                        {"server", "And more, your choice", "Slash commands and undo, Codex remote, Proxmox status, your own voice servers."}});
-                TextView go = Ui.pillButton(this, "Choose what to install", 0, Ui.BLUE, Ui.BLUE, Color.WHITE);
+                        {"server", "Only if you want them", "Voice servers, media servers, Codex or Claude Code remote, Proxmox status, slash commands. Hermes asks; skip what you don't use."}});
+                TextView go = Ui.pillButton(this, "Set up my server", 0, Ui.BLUE, Ui.BLUE, Color.WHITE);
                 go.setOnClickListener(v -> ServerSetup.offer(this, store, this::leave));
                 box.addView(go, lp(-1, dp(48), 0, 4, 0, 6));
-                TextView note = Ui.text(this, "You approve every command in the chat. Skip this and do it later from Settings.", 12, Ui.FAINT, false);
+                TextView note = Ui.text(this, "Hermes answers in a chat. You tap answers to its questions and approve every change. Skip this and do it later from Settings, Server pack.", 12, Ui.FAINT, false);
                 note.setGravity(Gravity.CENTER);
                 box.addView(note);
             });

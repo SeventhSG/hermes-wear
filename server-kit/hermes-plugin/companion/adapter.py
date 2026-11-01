@@ -197,6 +197,7 @@ class CompanionAdapter(BasePlatformAdapter):
         r.add_post("/v1/runs/{rid}/stop", self._stop)
         r.add_post("/v1/runs/{rid}/steer", self._steer)
         r.add_post("/v1/runs/{rid}/approval", self._approval)
+        r.add_post("/v1/runs/{rid}/clarify", self._clarify)
         self._web = web.AppRunner(app)
         await self._web.setup()
         try:
@@ -233,7 +234,7 @@ class CompanionAdapter(BasePlatformAdapter):
     # ── HTTP: runs ───────────────────────────────────────────────────────────────────────────
     async def _health(self, request):
         return web.json_response({"status": "ok", "platform": NAME, "runs": True, "approvals": True,
-                                  "steer": True, "images": True})
+                                  "steer": True, "images": True, "clarify": True})
 
     async def _start(self, request):
         try:
@@ -447,6 +448,26 @@ class CompanionAdapter(BasePlatformAdapter):
         run.emit("approval.resolved", choice=choice)
         return web.json_response({"ok": n > 0, "choice": choice, "resolved": n})
 
+    async def _clarify(self, request):
+        """The app answers a clarify card: a choice label, typed text, or a JSON array of labels (multi-select)."""
+        run = self._run(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        qid, answer = str(body.get("request_id") or "").strip(), body.get("answer")
+        if not qid or not isinstance(answer, str) or not answer.strip():
+            return web.json_response({"error": "request_id and answer are required"}, status=400)
+        if run is None:
+            return web.json_response({"error": "unknown run"}, status=404)
+        from tools.clarify_gateway import resolve_gateway_clarify
+        if not resolve_gateway_clarify(qid, answer.strip()):
+            run.emit("clarify.resolved", request_id=qid)
+            return web.json_response({"error": "this question was already answered or has expired"}, status=409)
+        run.clarify = False
+        run.emit("clarify.resolved", request_id=qid)
+        return web.json_response({"ok": True})
+
     def _gc(self) -> None:
         cutoff = time.time() - KEEP_FINISHED_S
         for rid in [k for k, r in self.runs.items() if r.status != "running" and r.finished_at < cutoff]:
@@ -572,10 +593,22 @@ class CompanionAdapter(BasePlatformAdapter):
         run = self._claim(chat_id)
         if run is None or run.status != "running":
             return SendResult(success=False, error="no live phone run")
-        lines = [str(question or "").strip()] + [f"{i}. {c}" for i, c in enumerate(choices or [], 1)]
-        run.clarify = True
-        run.note("\n".join(lines) + "\n\nReply to answer.")
+        try:
+            from tools.clarify_gateway import get_pending
+            multi = bool(getattr(get_pending(clarify_id), "multi_select", False))
+        except Exception:
+            multi = False
+        run.clarify = True   # a typed reply (steer) answers it through the gateway's text intercept
+        run.emit("clarify.request", prompt_id=str(clarify_id), question=str(question or "").strip(),
+                 choices=[str(c) for c in choices or []], multi_select=multi)
         return SendResult(success=True, message_id=str(clarify_id))
+
+    async def retire_clarify_card(self, clarify_id, notice=None) -> None:
+        """The gateway ends a question without an answer from the card (timeout, reset): drop the card."""
+        for run in list(self.runs.values()):
+            if run.clarify and run.status == "running":
+                run.clarify = False
+                run.emit("clarify.resolved", request_id=str(clarify_id), notice=str(notice or ""))
 
     async def _push(self, chat_id: str, content: str) -> None:
         if not await _notify(chat_id, content):

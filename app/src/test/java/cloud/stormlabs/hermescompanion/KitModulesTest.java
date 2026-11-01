@@ -83,4 +83,13 @@ public class KitModulesTest {
         assertTrue(v.contains("--pve-ssh"));
         assertTrue(v.startsWith("Please update"));
     }
+
+    @Test public void guidedSetupInterviewsWithClarifyAndRestartsTheGatewayLast() {
+        String g = ServerSetup.guided("tok9", 45678, false);
+        assertTrue(g.contains("tok9") && g.contains("45678") && g.contains("timeout 170 python3"));
+        assertTrue(g.contains("clarify tool") && g.contains("install.py list --json") && g.contains("--dry-run --yes"));
+        assertTrue(g.contains("systemd-run --on-active=10 systemctl restart hermes-gateway"));
+        assertFalse(g.contains("status --json"));
+        assertTrue(ServerSetup.guided("t", 40001, true).contains("install.py status --json"));
+    }
 }

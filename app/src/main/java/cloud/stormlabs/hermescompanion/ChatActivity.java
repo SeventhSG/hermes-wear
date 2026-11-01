@@ -1253,14 +1253,15 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
             liveBox.addView(liveBubble(seg[0], segText, i == lastText && textLast), match(-2));
         }
         if (!toolRun.isEmpty()) addTools(liveBox, toolRun, false);
-        if (features().approvals && run.approval != null) liveBox.addView(approvalCard(run), toolParams());
+        if (run.approval != null && run.approval.clarify) liveBox.addView(questionCard(run), toolParams());
+        else if (features().approvals && run.approval != null) liveBox.addView(approvalCard(run), toolParams());
         String shown = DeviceActions.stripForDisplay(text);
         if (!textLast) {
             // Working between messages (or before the first): a typing row says what Hermes is doing.
             LinearLayout wrap = new LinearLayout(this);
             LinearLayout bubble = new LinearLayout(this); bubble.setOrientation(LinearLayout.VERTICAL);
             LinearLayout.LayoutParams bp = styleMessage(wrap, bubble, false, lastText >= 0, true);
-            String status = run.approval != null ? "Waiting for your approval…" : !run.lastToolLine.isEmpty() ? "Working · " + run.lastToolLine : run.runId == null ? "Connecting…" : "Thinking…";
+            String status = run.approval != null ? (run.approval.clarify ? "Waiting for your answer…" : "Waiting for your approval…") : !run.lastToolLine.isEmpty() ? "Working · " + run.lastToolLine : run.runId == null ? "Connecting…" : "Thinking…";
             LinearLayout row = new LinearLayout(this); row.setGravity(Gravity.CENTER_VERTICAL);
             TypingDots dots = new TypingDots(this);
             row.addView(dots);
@@ -1350,6 +1351,41 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         return card;
     }
 
+    /** A clarify question, like Telegram's: one button per choice (checkboxes and Send when several may be picked); typing in the composer answers it too. */
+    private View questionCard(RunManager.LiveRun run) {
+        HermesApi.Approval q = run.approval;
+        LinearLayout card = new LinearLayout(this); card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(16), dp(14), dp(16), dp(12)); card.setBackground(Ui.stroke(this, Ui.tier(2), Ui.BLUE, 14)); Ui.elevate(card, 2);
+        card.addView(Ui.label(this, "Hermes asks", Ui.BLUE));
+        TextView head = Ui.title(this, q.description.isEmpty() ? "Hermes has a question" : q.description, Ui.TEXT); head.setPadding(0, dp(4), 0, 0); head.setTextIsSelectable(true);
+        card.addView(head);
+        java.util.Set<String> picked = new java.util.LinkedHashSet<>();
+        TextView send = Ui.primaryButton(this, "Send");
+        for (String choice : q.choices) {
+            TextView b = Ui.secondaryButton(this, choice);
+            b.setSingleLine(false); b.setGravity(Gravity.CENTER_VERTICAL | Gravity.START); b.setPadding(dp(14), dp(10), dp(14), dp(10)); b.setMinHeight(dp(48));
+            b.setOnClickListener(v -> {
+                if (!q.multi) { answerQuestion(run, choice); return; }
+                boolean on = picked.add(choice); if (!on) picked.remove(choice);
+                b.setText((on ? "✓  " : "") + choice); b.setSelected(on);
+                send.setEnabled(!picked.isEmpty()); send.setAlpha(picked.isEmpty() ? 0.5f : 1f);
+            });
+            LinearLayout.LayoutParams p = match(-2); p.topMargin = dp(8); card.addView(b, p);
+        }
+        if (q.multi) {
+            send.setEnabled(false); send.setAlpha(0.5f);
+            send.setOnClickListener(v -> answerQuestion(run, new org.json.JSONArray(new ArrayList<>(picked)).toString()));
+            LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, dp(48)); p.topMargin = dp(10); card.addView(send, p);
+        }
+        TextView hint = Ui.body(this, q.choices.isEmpty() ? "Type your answer below." : "Or type a different answer below.", Ui.FAINT);
+        hint.setPadding(0, dp(10), 0, 0); card.addView(hint);
+        return card;
+    }
+
+    private void answerQuestion(RunManager.LiveRun run, String answer) {
+        runs.answer(run, answer, r -> { if (!r.ok) toast(r.text); if (run.active()) renderLive(run); });
+    }
+
     private static int rank(String choice) { return "deny".equals(choice) ? 0 : "once".equals(choice) ? 2 : 1; }
 
     private void answer(RunManager.LiveRun run, String choice) {
@@ -1358,11 +1394,11 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
 
     private void updateRunStrip(RunManager.LiveRun run) {
         boolean working = run != null && run.active();
-        if (working) { subView.setText(run.approval != null ? "waiting for approval" : "working…"); subView.setContentDescription(null); } else showModel();
+        if (working) { subView.setText(run.approval != null ? (run.approval.clarify ? "waiting for your answer" : "waiting for approval") : "working…"); subView.setContentDescription(null); } else showModel();
         subView.setTextColor(working ? Ui.AMBER : Ui.FAINT);
         if (!working) { runStrip.setVisibility(View.GONE); return; }
         Ui.showFade(runStrip);
-        if (run.approval != null) { runStrip.setText("⚠  Waiting for your approval"); runStrip.setTextColor(Ui.AMBER); return; }
+        if (run.approval != null) { runStrip.setText(run.approval.clarify ? "?  Hermes is asking you something" : "⚠  Waiting for your approval"); runStrip.setTextColor(Ui.AMBER); return; }
         runStrip.setText("●  " + (run.lastToolLine.isEmpty() ? "Hermes is working" : run.lastToolLine) + " · tap to stop");
         runStrip.setTextColor(Ui.AMBER);
     }
@@ -1553,7 +1589,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         if (!automatic) agentRound = 0;
         RunManager.LiveRun live = runs.active(apiProfile, sessionId);
         if (live != null) {
-            if (!features().steer) { toast("Wait for the current run to finish"); return; }
+            if (!features().steer && (live.approval == null || !live.approval.clarify)) { toast("Wait for the current run to finish"); return; }
             // The steer rides into the live run, so show it there as its own bubble; the reloaded
             // transcript carries the same row once Hermes delivers it.
             runs.steer(live, text, r -> {
