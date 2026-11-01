@@ -71,7 +71,8 @@ final class ServerSetup {
                             .putExtra(ChatActivity.EXTRA_PROMPT, prompt.apply(token, port))
                             .putExtra(ChatActivity.EXTRA_AUTOSEND, true)
                             .putExtra(MainActivity.EXTRA_PROFILE_SECRET, store.intentSecret())
-                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                            // A fresh task: from onboarding the old task's MainActivity is gone, and delivering to it lost the chat.
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK));
                     if (opened != null) opened.run();
                 });
             } catch (Exception e) {

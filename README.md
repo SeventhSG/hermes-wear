@@ -2,6 +2,24 @@
 
 A native, mobile-first front end for a remote [Hermes Agent](https://hermes-agent.nousresearch.com/). It talks directly to the OpenAI-compatible Hermes API server you configure and keeps tool execution on your server.
 
+
+## Screenshots
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/screenshots/conversations.png" width="240" alt="Conversation list"><br><sub>Conversations</sub></td>
+    <td align="center"><img src="docs/screenshots/chat.png" width="240" alt="Chat with a tool card, table and chart"><br><sub>Tool cards, tables, images</sub></td>
+    <td align="center"><img src="docs/screenshots/file-card.png" width="240" alt="A file Hermes sent, as a card"><br><sub>Files from Hermes</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshots/question.png" width="240" alt="Hermes asking a multiple-choice question"><br><sub>Hermes asks, you tap</sub></td>
+    <td align="center"><img src="docs/screenshots/setup.png" width="240" alt="Guided server setup"><br><sub>Guided server setup</sub></td>
+    <td align="center"><img src="docs/screenshots/modules.png" width="240" alt="Choosing modules after connecting"><br><sub>Only the modules you want</sub></td>
+  </tr>
+</table>
+
+<sub>Demo data on an emulator; no real account.</sub>
+
 ## Features
 
 ### Conversations
