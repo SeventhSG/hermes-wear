@@ -18,6 +18,9 @@ public final class RunActionReceiver extends BroadcastReceiver {
     static final String ACTION_MUTE_ALERT = "cloud.stormlabs.hermescompanion.MUTE_ALERT";
     static final String EXTRA_SESSION = "session", EXTRA_CHOICE = "choice";
 
+    /** A button without an origin profile (older notifications) acts on the current profile instead of doing nothing. */
+    static String profileOrDefault(String extra, String current) { return extra == null || extra.isEmpty() ? current : extra; }
+
     @Override public void onReceive(Context context, Intent intent) {
         if (ACTION_MUTE_ALERT.equals(intent.getAction())) {
             String key = intent.getStringExtra(EXTRA_CHOICE);
@@ -44,8 +47,7 @@ public final class RunActionReceiver extends BroadcastReceiver {
         String action = intent.getAction();
         if (session == null || action == null) return;
         RunManager rm = RunManager.get(c);
-        String originProfile = intent.getStringExtra(MainActivity.EXTRA_PROFILE);
-        if (originProfile == null) return;
+        String originProfile = profileOrDefault(intent.getStringExtra(MainActivity.EXTRA_PROFILE), new SettingsStore(c).profileId());
         switch (action) {
             case ACTION_STOP:
                 rm.stop(rm.active(originProfile, session));

@@ -4,6 +4,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.fail;
 
 import org.json.JSONObject;
@@ -23,7 +24,7 @@ public class HermesApiEdgeTest {
 
     private static final class Recorder implements HermesApi.StreamListener {
         final StringBuilder deltas = new StringBuilder();
-        final List<String> tools = new ArrayList<>(), errors = new ArrayList<>();
+        final List<String> tools = new ArrayList<>(), errors = new ArrayList<>(), notes = new ArrayList<>();
         String runId, complete;
         HermesApi.Approval approval;
         HermesApi.RunOutcome outcome;
@@ -34,6 +35,7 @@ public class HermesApiEdgeTest {
         public void onError(String error) { errors.add(error); }
         @Override public void onApproval(HermesApi.Approval value) { approval = value; }
         @Override public void onRunFinished(HermesApi.RunOutcome value) { outcome = value; }
+        @Override public void onCommentary(String text) { notes.add(text); }
     }
 
     @Test public void errorTextHandlesRealApiAndProxyBodies() {
@@ -48,6 +50,32 @@ public class HermesApiEdgeTest {
         assertEquals("HTTP 500", HermesApi.errorText(500, ""));
         assertEquals("HTTP 500: upstream reset", HermesApi.errorText(500, "upstream reset"));
         assertEquals("HTTP 404: this URL has no Hermes API here. Check the host, port and any path prefix.", HermesApi.errorText(404, ""));
+    }
+
+    @Test public void forbiddenRunReportsPolicyAndActualRouteWithoutResending() throws Exception {
+        server.json("POST /v1/runs", 403, "<html><body>403 Forbidden</body></html>");
+        Recorder r = new Recorder();
+        api().streamChat("s1", "go", r);
+        assertEquals(1, r.errors.size());
+        String error = r.errors.get(0);
+        assertTrue(error, error.contains("access denied by the server or reverse proxy"));
+        assertTrue(error, error.contains("Backup addresses"));
+        assertTrue(error, error.contains("POST 127.0.0.1:"));
+        assertTrue(error, error.endsWith("/v1/runs)"));
+        assertFalse(error, error.contains("refused this key"));
+        assertNull(r.complete);
+        assertFalse(server.seen.stream().anyMatch(q -> q.path.endsWith("/chat/stream")));
+    }
+
+    @Test public void forbiddenEventsStopWithoutRetryAndKeepServerPolicy() throws Exception {
+        server.json("GET /v1/runs/r/events", 403, "{\"error\":{\"message\":\"Room authorization needs to be renewed.\"}}");
+        Recorder r = new Recorder();
+        api().followRun("r", null, r);
+        assertEquals(1, server.seen.size());
+        assertEquals(1, r.errors.size());
+        assertTrue(r.errors.get(0), r.errors.get(0).startsWith("HTTP 403: Room authorization needs to be renewed."));
+        assertTrue(r.errors.get(0), r.errors.get(0).endsWith("/v1/runs/r/events)"));
+        assertNull(r.complete);
     }
 
     @Test public void requestJsonReportsProxyAndNonJsonReplies() throws Exception {
@@ -113,6 +141,27 @@ public class HermesApiEdgeTest {
         Recorder r = new Recorder(); api.streamChat("s1", "go", r);
         assertEquals("r7", r.runId);
         assertEquals("ok", r.complete);
+        // Not silent: the chat says which path the turn took and why, also while the 60 s backoff skips the gateway.
+        assertEquals(1, r.notes.size());
+        assertTrue(r.notes.get(0), r.notes.get(0).startsWith("Sent through the API server because nothing answers on port 8797"));
+        Recorder again = new Recorder(); api.streamChat("s1", "go", again);
+        assertEquals(r.notes, again.notes);
+        // With the gateway off in Settings the API is the chosen path, so nothing is said.
+        api.useGateway = false;
+        Recorder off = new Recorder(); api.streamChat("s1", "go", off);
+        assertTrue(off.notes.isEmpty());
+        assertEquals("Chat through the gateway is off", api.probeGateway());
+        assertTrue(profile.probeGateway().startsWith("profile chats use the API server"));
+        api.useGateway = true;
+        assertTrue(api.probeGateway().startsWith("nothing answers on port 8797"));
+    }
+
+    @Test public void gatewayFallbackReasonsArePlainWords() {
+        assertEquals("the gateway refused the app's API key",
+                HermesApi.gatewayFallbackReason(new IllegalStateException("HTTP 401: unauthorized")));
+        assertTrue(HermesApi.gatewayFallbackReason(new IllegalStateException("HTTP 404: Not Found")).contains("isn't installed"));
+        assertTrue(HermesApi.gatewayFallbackReason(new java.net.SocketTimeoutException("x")).contains("out of reach"));
+        assertTrue(HermesApi.gatewayFallbackReason(new java.net.ConnectException("refused")).contains("isn't running"));
     }
 
     @Test public void durableRunAsksStatusWhenStreamClosesEarly() throws Exception {

@@ -32,7 +32,7 @@ final class Harness {
             SettingsStore.Profile elsewhere = elsewhere(store, type);
             boolean ready = store.harnessReady(type) || elsewhere != null;
             String sub = current ? "In use" : ready ? what(type) : "Not set up yet: tap to connect";
-            items.add(Sheets.Item.of(type.equals("Hermes") ? R.drawable.ic_assistant : R.drawable.ic_session, Ui.BLUE_DARK, type, sub,
+            items.add(Sheets.Item.of(type.equals("Hermes") ? R.drawable.ic_assistant : R.drawable.ic_session, Ui.BLUE_DARK, Brand.name(store.brandName(), type), sub,
                     () -> { if (!current) switchTo(a, type); }).checked(current));
         }
         Sheets.actions(a, "Harness", "Which agent this chat talks to", items.toArray(new Sheets.Item[0]));
@@ -50,7 +50,7 @@ final class Harness {
             SettingsStore.Profile p = elsewhere(store, type);
             if (p != null) { Profiles.switchTo(a, p.id); return; }
             store.serverType(type);  // not set up: connect it, then the chat opens on it
-            a.startActivity(new Intent(a, ConnectionActivity.class));
+            a.startActivity(new Intent(a, ConnectionActivity.class).putExtra(ConnectionActivity.EXTRA_OPEN_NEW_CHAT, true));
             return;
         }
         store.serverType(type);

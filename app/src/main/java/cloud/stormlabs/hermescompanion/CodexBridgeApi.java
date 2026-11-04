@@ -14,4 +14,9 @@ public final class CodexBridgeApi extends HermesApi {
     @Override public boolean supportsCommands() { return true; }
 
     @Override public Capabilities capabilitiesForUi() { return CODEX; }
+    /** The bridge has no /health/detailed; capabilities says whether its Codex app-server is connected. */
+    @Override public org.json.JSONObject healthDetailed() throws Exception {
+        org.json.JSONObject c = capabilities();
+        return c.put("gateway_state", c.optBoolean("connected", true) ? "running" : "stopped");
+    }
 }

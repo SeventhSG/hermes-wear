@@ -13,6 +13,8 @@ public interface AgentBackend {
     default JSONObject runCommand(String sessionId, String command) throws Exception { throw new UnsupportedOperationException("Slash commands are unavailable for this server"); }
     default JSONObject getSessionSettings(String id) throws Exception { throw new UnsupportedOperationException("Agent settings are unavailable for this server"); }
     default HermesApi.Result setSessionSettings(String id, JSONObject fields) { return HermesApi.Result.error("Agent settings are unavailable for this server"); }
+    default JSONObject usage(String sid, boolean refresh) throws Exception { throw new UnsupportedOperationException("Usage is unavailable"); }
+    default HermesApi.Result resetUsage(String sid) { return HermesApi.Result.error("Usage resets are unavailable"); }
     HermesApi.Result health();
     JSONObject capabilities() throws Exception;
     JSONObject healthDetailed() throws Exception;

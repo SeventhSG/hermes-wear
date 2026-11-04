@@ -6,11 +6,7 @@ import android.content.Intent;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
-import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.LinearGradient;
-import android.graphics.Paint;
-import android.graphics.Shader;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
@@ -54,6 +50,7 @@ public final class SettingsActivity extends Activity {
     private TextView connectionState;
     private final ExecutorService network = Executors.newSingleThreadExecutor();
     private boolean hasApiKey;
+    private String gatewayStatus, gatewayStatusEndpoint;
 
     private int dp(int n) { return Ui.dp(this, n); }
     private LinearLayout.LayoutParams match(int h) { return new LinearLayout.LayoutParams(-1, h < 0 ? h : dp(h)); }
@@ -62,6 +59,7 @@ public final class SettingsActivity extends Activity {
         super.onCreate(b);
         Ui.legacyWindowInsets(this);
         store = new SettingsStore(this);
+        if (b != null) page = b.getString("page");  // a theme or branding change recreates the screen: stay on the same page
         getWindow().setStatusBarColor(Ui.BAR);
         getWindow().setNavigationBarColor(Ui.BG);
         build();
@@ -208,6 +206,9 @@ public final class SettingsActivity extends Activity {
         if (hermes) addToggle(advServer, R.drawable.ic_shield, 0xff7658b6, "Chat through the gateway",
                 "Turns run like Telegram chats: risky commands and code ask you instead of being blocked, Hermes can ask questions, cron results reach the phone. Falls back to the API when the gateway is out of reach",
                 store.useGateway(), checked -> store.useGateway(checked));
+        if (hermes && store.useGateway()) addRow(advServer, R.drawable.ic_pulse, 0xff7658b6, "Gateway",
+                gatewayStatus != null && store.endpoint().equals(gatewayStatusEndpoint) ? gatewayStatus : HermesApi.gatewayFallback == null ? "Tap to check which path chats use" : "Chats use the API server: " + HermesApi.gatewayFallback,
+                true, v -> checkGateway());
         if (hermes) addRow(advServer, R.drawable.ic_server, 0xff318f88, "Server pack",
                 "Hermes sets up or updates the server side with you, or you pick the modules yourself", true, v -> ServerSetup.offer(this, store, null));
         addRow(advServer, R.drawable.ic_pulse, 0xff916239, "Daily token budget",
@@ -299,8 +300,10 @@ public final class SettingsActivity extends Activity {
                 "Read answers aloud when you ask by voice", store.speakReplies(),
                 checked -> store.speakReplies(checked));
         addRow(voice, R.drawable.ic_reply, 0xffb0793f, "After Hermes answers", afterAnswerLabel(), true, v -> pickAfterAnswer());
-        addToggle(voice, R.drawable.ic_assistant, 0xff7658b6, "Wake word \"Hey Hermes\"", wakeSubtitle(),
+        addToggle(voice, R.drawable.ic_assistant, 0xff7658b6, "Wake word \"" + store.wakeLabel() + "\"", wakeSubtitle(),
                 store.wakeEnabled(), checked -> onWakeToggled(checked));
+        addRow(voice, R.drawable.ic_edit, 0xff7658b6, "Wake phrase", store.wakeLabel() + (store.wakeTokens().isEmpty() ? " · built in"
+                : store.wakeThreshold() > 0 ? " · tuned to your voice" : " · not trained yet"), true, v -> editWakePhrase());
         if (store.wakeEnabled()) addRow(voice, R.drawable.ic_tools, 0xff7658b6, "Wake word sensitivity",
                 store.wakeSensitivity() + " · High wakes more easily but may wake by mistake", false,
                 v -> Sheets.actions(this, "Wake word sensitivity", "High wakes more easily but may wake by mistake",
@@ -366,8 +369,16 @@ public final class SettingsActivity extends Activity {
         addRow(interfaceGroup, R.drawable.ic_palette, 0xff916239, "Style",
                 Ui.concept.name + " · " + Ui.concept.blurb, true,
                 v -> Sheets.concepts(this, Ui.concept, c -> Ui.switchTo(this, c)));
+        addRow(interfaceGroup, R.drawable.ic_palette, 0xff3a6f8f, "Custom theme",
+                String.format("#%06x background", store.uiCustomBg() & 0xffffff), true, v -> editCustomTheme());
         addRow(interfaceGroup, R.drawable.ic_palette, 0xff7658b6, "Accent colour",
                 accentName(), true, v -> Sheets.accents(this, store.uiAccent(), c -> { Ui.switchAccent(this, c); }));
+        addRow(interfaceGroup, R.drawable.ic_assistant, 0xff3f82d0, "Assistant name",
+                Brand.name(store.brandName(), "Hermes"), true,
+                v -> Sheets.input(this, "Assistant name", "What your Hermes agent is called in chat. Leave empty for Hermes.",
+                        store.brandName(), "Hermes", name -> { store.brandName(name); Ui.switchTo(this, Ui.concept); }, "Save", true));
+        addRow(interfaceGroup, R.drawable.ic_image, 0xff916239, "Logo",
+                Brand.file(this).exists() ? "Your image" : "Built-in mark", true, v -> editLogo());
         addRow(interfaceGroup, R.drawable.ic_menu, 0xff3f82d0, "Layout",
                 Ui.layout.name + " · " + Ui.layout.blurb, true,
                 v -> Sheets.layouts(this, Ui.layout, l -> Ui.switchLayout(this, l)));
@@ -462,16 +473,18 @@ public final class SettingsActivity extends Activity {
         card.setGravity(Gravity.CENTER_VERTICAL);
         card.setPadding(dp(16), dp(16), dp(16), dp(16));
         card.setBackground(Ui.card(this, 2));
-        IdentityGlyph glyph = new IdentityGlyph();
+        // The harness's own mark, as in the chat header: the Hermes orb, or Claude Code / Codex on a plain disc.
+        View glyph = ChatViews.mark(this, 52, false, store.serverType());
+        if (!"Hermes".equals(store.serverType())) glyph.setBackground(Ui.circle(Ui.tier(3)));
         glyph.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        card.addView(glyph, new LinearLayout.LayoutParams(dp(76), dp(76)));
+        card.addView(glyph, new LinearLayout.LayoutParams(dp(56), dp(56)));
         LinearLayout text = new LinearLayout(this);
         text.setOrientation(LinearLayout.VERTICAL);
         text.setPadding(dp(16), 0, 0, 0);
-        TextView title = Ui.text(this, "Hermes", 22, Ui.TEXT, true);
+        TextView title = Ui.text(this, store.profileName(), 22, Ui.TEXT, true);
         title.setLetterSpacing(-.02f);
         text.addView(title);
-        text.addView(Ui.text(this, "Personal agent · " + host(store.endpoint()), 13, Ui.SUB, false));
+        text.addView(Ui.text(this, ("Hermes".equals(store.serverType()) ? "Personal agent" : store.serverType()) + " · " + host(store.endpoint()), 13, Ui.SUB, false));
         // render() runs again after the check (onResume's key check re-renders), so show the cached result, not "checking".
         connectionState = Ui.text(this, connOk == null ? "●  CHECKING CONNECTION" : connOk ? "●  ONLINE" : "●  UNREACHABLE", 11,
                 connOk == null ? Ui.AMBER : connOk ? Ui.GREEN : Ui.RED, true);
@@ -501,13 +514,33 @@ public final class SettingsActivity extends Activity {
         return card;
     }
 
+    /** Probes the gateway plugin and says plainly which path chats take; offers Hermes-run repair when it's missing. */
+    private void checkGateway() {
+        Toast.makeText(this, "Checking the gateway\u2026", Toast.LENGTH_SHORT).show();
+        String endpoint = store.endpoint();
+        Object backend = Backends.create(store);
+        new Thread(() -> {
+            String why = backend instanceof HermesApi ? ((HermesApi) backend).probeGateway() : "this server isn't Hermes";
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed() || !endpoint.equals(store.endpoint())) return;
+                gatewayStatusEndpoint = endpoint;
+                gatewayStatus = why == null ? "Chats use the gateway" : "Gateway check failed: " + why;
+                if (why == null) Sheets.actions(this, "Chats use the gateway",
+                        "Risky commands and code ask you with a card, Hermes can ask questions and send files, cron results reach the phone.");
+                else Sheets.actions(this, "Gateway check failed", "Because " + why + ". If the gateway is unreachable, chats fall back to the API server, "
+                                + "which cannot ask questions or approve risky commands.",
+                        Sheets.Item.of(R.drawable.ic_settings, Ui.BLUE, "Repair with Hermes",
+                                "Hermes installs or fixes the Companion gateway plugin in a chat, asking before changes",
+                                () -> ServerSetup.repairGateway(this, store)));
+                render();
+            });
+        }, "gateway-check").start();
+    }
+
     private void addRow(LinearLayout card, int icon, int color, String title, String subtitle, boolean divider, View.OnClickListener click) {
         LinearLayout row = baseRow(icon, color, title, subtitle);
         if (click != null) {
-            TextView arrow = Ui.text(this, "›", 25, Ui.FAINT, false);
-            arrow.setGravity(Gravity.CENTER);
-            arrow.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-            row.addView(arrow, new LinearLayout.LayoutParams(dp(26), dp(56)));
+            row.addView(Ui.chevron(this), new LinearLayout.LayoutParams(dp(18), dp(18)));
             row.setOnClickListener(click);
             row.setBackground(Ui.ripple(this, Color.TRANSPARENT, 16));
         }
@@ -740,7 +773,7 @@ public final class SettingsActivity extends Activity {
 
     /** Says what the wake word will actually do: that depends on being the default assistant. */
     private String wakeSubtitle() {
-        if (!store.wakeEnabled()) return "Say \"Hey Hermes\" hands-free · on-device, mic stays on";
+        if (!store.wakeEnabled()) return "Say \"" + store.wakeLabel() + "\" hands-free · on-device, mic stays on";
         long remaining = WakeWordService.pauseRemaining(store);
         if (remaining > 0) return "Paused until " + android.text.format.DateFormat.format("HH:mm", System.currentTimeMillis() + remaining);
         if (!WakeWordService.isRunning()) return "Paused · open Hermes to resume";
@@ -811,6 +844,85 @@ public final class SettingsActivity extends Activity {
         Sheets.actions(this, "Speech rate", "Playback speed for spoken replies",
                 speechRateItem(0.8f, current), speechRateItem(1.0f, current),
                 speechRateItem(1.2f, current), speechRateItem(1.5f, current), speechRateItem(1.8f, current));
+    }
+
+    @Override protected void onSaveInstanceState(Bundle out) { super.onSaveInstanceState(out); out.putString("page", page); }
+
+    private void editWakePhrase() {
+        if (store.wakeTokens().isEmpty()) { askWakePhrase(); return; }
+        Sheets.actions(this, "Wake phrase", store.wakeLabel(),
+                Sheets.Item.of(R.drawable.ic_edit, Ui.BLUE_DARK, "Change phrase", "Type a new one, then say it " + WakePhrase.TRAIN_TIMES + " times", this::askWakePhrase),
+                Sheets.Item.of(R.drawable.ic_voice, Ui.BLUE_DARK, "Train again", "Say it " + WakePhrase.TRAIN_TIMES + " times to re-tune it to your voice", this::trainWakePhrase),
+                Sheets.Item.of(R.drawable.ic_delete, Ui.RED, "Back to \"Hey Hermes\"", "The built-in wake word", () -> { store.wakePhrase("", ""); render(); }));
+    }
+
+    private void askWakePhrase() {
+        Sheets.input(this, "Wake phrase", "Two or three words work best, like Hey Jarvis. Short or everyday words wake by mistake.",
+                store.wakeTokens().isEmpty() ? "" : store.wakePhrase(), "Hey Jarvis", value -> {
+                    String tokens;
+                    try { tokens = WakePhrase.tokens(value, WakePhrase.vocab(this)); } catch (Exception e) { tokens = null; }
+                    if (tokens == null) { Toast.makeText(this, "Use English letters only", Toast.LENGTH_SHORT).show(); return; }
+                    if (tokens.split(" ").length < 4) { Toast.makeText(this, "Too short: it would wake by mistake. Add a word, like \"Hey\"", Toast.LENGTH_LONG).show(); return; }
+                    store.wakePhrase(WakePhrase.label(value), tokens);
+                    render();
+                    trainWakePhrase();
+                });
+    }
+
+    private void trainWakePhrase() {
+        if (!WakeWordService.modelInstalled(this)) { Toast.makeText(this, "Turn on the wake word first, then train", Toast.LENGTH_LONG).show(); return; }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) { requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, WAKE_REQ); return; }
+        Sheets.wakeTraining(this, store.wakeLabel(), store.wakeTokens(), hits -> {
+            int heard = hits[hits.length - 1];
+            if (heard < WakePhrase.TRAIN_TIMES / 2) {
+                Sheets.confirm(this, "Only heard it " + heard + (heard == 1 ? " time" : " times"),
+                        "Speak a little closer and clearer, or pick a phrase with more distinct sounds.", "Try again", false, this::trainWakePhrase);
+                return;
+            }
+            store.wakeThreshold(WakePhrase.pick(hits));
+            render();
+            Toast.makeText(this, "Tuned to your voice: heard it " + heard + " times", Toast.LENGTH_SHORT).show();
+        });
+    }
+
+    private static final int LOGO_REQ = 7301;
+
+    private void editLogo() {
+        Runnable pick = () -> {
+            try { startActivityForResult(new Intent(Intent.ACTION_GET_CONTENT).setType("image/*"), LOGO_REQ); }
+            catch (Exception e) { Toast.makeText(this, "No image picker on this phone", Toast.LENGTH_SHORT).show(); }
+        };
+        if (!Brand.file(this).exists()) { pick.run(); return; }
+        Sheets.actions(this, "Logo", "Shown in chat, the drawer and the lock screen",
+                Sheets.Item.of(R.drawable.ic_image, Ui.BLUE_DARK, "Choose an image", "Square works best; it is cropped to a circle", pick),
+                Sheets.Item.of(R.drawable.ic_delete, Ui.RED, "Use the built-in mark", "Removes your image", () -> { Brand.clearLogo(this); Ui.switchTo(this, Ui.concept); }));
+    }
+
+    @Override protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        if (request != LOGO_REQ || result != RESULT_OK || data == null || data.getData() == null) return;
+        android.net.Uri uri = data.getData();
+        new Thread(() -> {
+            String error = null;
+            try { Brand.setLogo(this, uri); } catch (Exception e) { error = e.getMessage(); }
+            String shown = error;
+            runOnUiThread(() -> {
+                if (shown != null) Toast.makeText(this, "Couldn't use that image: " + shown, Toast.LENGTH_SHORT).show();
+                else Ui.switchTo(this, Ui.concept);
+            });
+        }, "brand-logo").start();
+    }
+
+    /** Custom theme: one background colour (hex); text, cards and lines are derived from it. */
+    private void editCustomTheme() {
+        Sheets.input(this, "Custom theme", "Background colour as hex, like 101418 (dark) or f4f1ea (light). Cards, text and lines follow it.",
+                String.format("%06x", store.uiCustomBg() & 0xffffff), "101418", value -> {
+                    Integer c = Accent.hex(value);
+                    if (c == null) { Toast.makeText(this, "Use 6 hex digits, like 101418", Toast.LENGTH_SHORT).show(); return; }
+                    store.uiCustomBg(c);
+                    Concept.custom = Concept.custom(c);
+                    Ui.switchTo(this, Concept.custom);
+                }, "Use");
     }
 
     private String accentName() {
@@ -1212,33 +1324,6 @@ public final class SettingsActivity extends Activity {
 
     @Override protected void onDestroy() { super.onDestroy(); network.shutdownNow(); if (previewSpeaker != null) { previewSpeaker.shutdown(); previewSpeaker = null; } }
 
-    private final class IdentityGlyph extends View {
-        private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        IdentityGlyph() { super(SettingsActivity.this); }
-        protected void onDraw(Canvas c) {
-            float d = getResources().getDisplayMetrics().density, cx = getWidth() / 2f, cy = getHeight() / 2f;
-            p.setShader(new LinearGradient(0, 0, getWidth(), getHeight(), 0xff5a9cf4, 0xff6d62c8, Shader.TileMode.CLAMP));
-            c.drawCircle(cx, cy, 30 * d, p);
-            p.setShader(null);
-            p.setStyle(Paint.Style.STROKE);
-            p.setStrokeWidth(1 * d);
-            p.setColor(0x6699c7ff);
-            c.drawCircle(cx, cy, 35 * d, p);
-            p.setStyle(Paint.Style.FILL);
-            p.setColor(Color.WHITE);
-            p.setTextSize(25 * d);
-            p.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
-            p.setTextAlign(Paint.Align.CENTER);
-            c.drawText("H", cx, cy + 9 * d, p);
-            p.setColor(Ui.GREEN);
-            c.drawCircle(cx + 27 * d, cy + 20 * d, 4 * d, p);
-            p.setStyle(Paint.Style.STROKE);
-            p.setStrokeWidth(2 * d);
-            p.setColor(Ui.BAR);
-            c.drawCircle(cx + 27 * d, cy + 20 * d, 5 * d, p);
-            p.setStyle(Paint.Style.FILL);
-        }
-    }
     @Override public void onBackPressed() {
         if (search != null && search.getText().length() > 0) { search.setText(""); return; }
         if (page != null) { page = null; render(); scroll.scrollTo(0, 0); return; }

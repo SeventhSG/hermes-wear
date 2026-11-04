@@ -64,7 +64,9 @@ final class ConversationList {
     /** Rows by session id, reused while typing; cleared when the list reloads. */
     private final java.util.Map<String, View> rowCache = new java.util.HashMap<>();
     private final Runnable typed = () -> render(query());
-    private boolean searching, searchError, closed;
+    private boolean searching, searchError, closed, everythingFailed;
+    /** Bumped per load(): rename/pin/archive/retry each reload, and only the newest answer may be applied. */
+    private int loadSeq;
     private final Set<String> expanded = new java.util.HashSet<>();
 
     ConversationList(Activity a, AgentBackend api, String apiProfile, ExecutorService network, Host host) {
@@ -109,7 +111,7 @@ final class ConversationList {
 
     /** The list starts with the newest 150; the first search (or "Show older conversations") pulls in the rest, up to 1500. */
     private void loadEverythingForSearch() {
-        if (everythingLoaded || loadingEverything || sessions.isEmpty()) return;
+        if (everythingLoaded || loadingEverything || everythingFailed || sessions.isEmpty()) return;
         loadingEverything = true;
         network.submit(() -> {
             try {
@@ -127,13 +129,14 @@ final class ConversationList {
                     if (!closed) render(query());
                 });
             } catch (Exception e) {
-                a.runOnUiThread(() -> loadingEverything = false);
+                a.runOnUiThread(() -> { loadingEverything = false; everythingFailed = true; if (!closed) render(query()); });
             }
         });
     }
 
     void load() {
-        everythingLoaded = false;
+        everythingLoaded = false; everythingFailed = false;
+        final int seq = ++loadSeq;
         network.submit(() -> {
             try {
                 // Filtered pages can come back thin (empty cron runs), so keep paging until there is a screenful.
@@ -143,10 +146,10 @@ final class ConversationList {
                     for (HermesApi.SessionInfo si : page) if (!emptyCronRun(si)) all.add(si);
                     if (page.isEmpty()) break;
                 }
-                a.runOnUiThread(() -> { sessions.clear(); sessions.addAll(all); rowCache.clear(); renderChips(); render(query()); });
+                a.runOnUiThread(() -> { if (closed || !isLatestLoad(seq, loadSeq)) return; sessions.clear(); sessions.addAll(all); rowCache.clear(); renderChips(); render(query()); });
             } catch (Exception e) {
                 a.runOnUiThread(() -> {
-                    if (list == null) return;
+                    if (list == null || closed || !isLatestLoad(seq, loadSeq)) return;
                     list.removeAllViews();
                     TextView err = Ui.body(a, "Couldn't load your conversations. Tap to retry.\n" + HermesApi.friendly(e), Ui.RED);
                     err.setPadding(dp(18), dp(18), dp(18), 0);
@@ -156,6 +159,9 @@ final class ConversationList {
             }
         });
     }
+
+    /** Overlapping reloads finish in any order; only the answer to the newest request may replace the list. */
+    static boolean isLatestLoad(int requested, int latest) { return requested == latest; }
 
     /** Hermes records an empty session for every no-agent cron run; hundreds a day would bury real chats. */
     static boolean emptyCronRun(HermesApi.SessionInfo si) {
@@ -237,13 +243,14 @@ final class ConversationList {
         for (String[] def : defs) {
             int ci = Integer.parseInt(def[2]);
             if (ci > 0 && counts[ci] == 0) continue;
+            if (ci > 0 && counts[ci] == counts[0]) continue; // "Other 60" next to "All 60" is the same list twice
             final String key = def[0];
             boolean on = key.equals(filter);
             TextView c = Ui.text(a, def[1] + (ci >= 0 && counts[ci] > 0 ? "  " + counts[ci] : ""), 12.5f, on ? Color.WHITE : Ui.SUB, on);
             c.setGravity(Gravity.CENTER); c.setPadding(dp(10), 0, dp(10), 0);
-            c.setBackground(on ? Ui.round(a, Ui.BLUE_DARK, 99) : Ui.stroke(a, Color.TRANSPARENT, Ui.LINE, 99));
+            c.setBackground(Ui.round(a, on ? Ui.BLUE_DARK : Ui.tier(2), 99)); // filled segments, no outlined ovals
             c.setOnClickListener(v -> { filter = key; renderChips(); render(query()); });
-            c.setMinHeight(dp(40));
+            c.setMinHeight(dp(32));
             c.setSelected(on);
             LinearLayout target = new LinearLayout(a);
             target.setGravity(Gravity.CENTER_VERTICAL);
@@ -318,6 +325,7 @@ final class ConversationList {
             t.setPadding(dp(18), dp(20), 0, 0); list.addView(t);
         }
         int localCount = inbox.size() + pinnedList.size() + rest.size() + (q.isEmpty() ? 0 : Math.max(0, list.getChildCount() - 1));
+        if (everythingFailed && !q.isEmpty()) header("Older conversations couldn't be loaded · search covers recent ones only");
         if (q.length() >= 3 && localCount < 5 && !"needs".equals(filter)) {
             if (!q.equals(searchState)) {
                 searchState = q; messages.clear(); searchError = false; searching = true;
@@ -434,17 +442,15 @@ final class ConversationList {
         row.setOnLongClickListener(v -> { v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS); showActions(si); return true; });
         row.setOnClickListener(v -> host.open(si));
         row.setContentDescription(si.displayTitle() + (active ? ", current conversation" : "") + (si.pinned ? ", pinned" : "") + (si.unread ? ", unread" : "")
-                + (working ? ", Hermes is working" : "") + ", " + previewOf(si));
-        TextView av = Ui.text(a, init(si.displayTitle()), 15, active ? Ui.BLUE : Ui.SUB, true); av.setGravity(Gravity.CENTER);
-        av.setBackground(Ui.circle(active ? (Ui.BLUE & 0xffffff) | 0x29000000 : Ui.tier(2)));
-        av.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        row.addView(av, new LinearLayout.LayoutParams(dp(44), dp(44)));
-        LinearLayout mid = new LinearLayout(a); mid.setOrientation(LinearLayout.VERTICAL); mid.setPadding(dp(12), 0, dp(8), 0);
+                + (working ? ", " + Backends.type(api) + " is working" : "") + ", " + previewOf(si));
+        row.setMinimumHeight(dp(60)); // no letter avatars: title and preview carry the row, as in Claude and ChatGPT
+        LinearLayout mid = new LinearLayout(a); mid.setOrientation(LinearLayout.VERTICAL); mid.setPadding(dp(6), 0, dp(8), 0);
         TextView name = Ui.body(a, si.displayTitle(), Ui.TEXT); name.setTypeface(Ui.WORD_SEMI);
         name.setSingleLine(true); name.setEllipsize(TextUtils.TruncateAt.END); mid.addView(name);
         String kind = kindOf(si);
-        String prefix = kind.equals("chats") ? "" : (kind.equals("auto") ? "⏱ " : "◆ " + si.source + " · ");
-        TextView prev = Ui.caption(a, working ? "Hermes is working…" : prefix + (kind.equals("auto") ? ChatActivity.scheduledPreview(previewOf(si)) : previewOf(si)), working ? Ui.AMBER : Ui.SUB);
+        // A bridge's sessions all come from its own CLI, so naming the source there says nothing.
+        String prefix = kind.equals("chats") ? "" : kind.equals("auto") ? "⏱ " : "Hermes".equals(Backends.type(api)) ? si.source + " · " : "";
+        TextView prev = Ui.caption(a, working ? Backends.type(api) + " is working…" : prefix + (kind.equals("auto") ? ChatActivity.scheduledPreview(previewOf(si)) : previewOf(si)), working ? Ui.AMBER : Ui.SUB);
         prev.setSingleLine(true); prev.setEllipsize(TextUtils.TruncateAt.END); mid.addView(prev);
         row.addView(mid, new LinearLayout.LayoutParams(0, -2, 1));
         LinearLayout right = new LinearLayout(a); right.setOrientation(LinearLayout.VERTICAL); right.setGravity(Gravity.END);

@@ -68,12 +68,12 @@ class MediaServers(unittest.TestCase):
         seen = []
         sessions = {"MediaContainer": {"Metadata": [{"type": "episode", "grandparentTitle": "Show", "title": "Ep", "parentIndex": 2, "index": 3,
                                                      "grandparentThumb": "/library/metadata/9/thumb/1", "viewOffset": 60000, "duration": 120000,
-                                                     "User": {"title": "adrian"}, "Player": {"product": "Plex Web", "title": "Chrome", "state": "paused"},
+                                                     "User": {"title": "alex"}, "Player": {"product": "Plex Web", "title": "Chrome", "state": "paused"},
                                                      "Session": {"id": "s1"}}]}}
         with mock.patch("urllib.request.urlopen", serve({"/status/sessions/terminate": b"", "/status/sessions": sessions}, seen)):
             status, out = route("GET", "/media/plex/sessions")
             s = out["sessions"][0]
-            self.assertEqual((s["title"], s["user"], s["paused"], s["position"], s["duration"]), ("Show S02E03", "adrian", True, 60.0, 120.0))
+            self.assertEqual((s["title"], s["user"], s["paused"], s["position"], s["duration"]), ("Show S02E03", "alex", True, 60.0, 120.0))
             self.assertEqual(route("POST", "/media/plex/control", "", json.dumps({"session": "s1", "cmd": "stop"}).encode())[0], 200)
             self.assertEqual(route("POST", "/media/plex/control", "", json.dumps({"session": "s1", "cmd": "playpause"}).encode())[0], 501)
         self.assertIn("sessionId=s1", seen[-1][1])

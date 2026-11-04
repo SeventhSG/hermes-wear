@@ -54,7 +54,7 @@ public final class Sheets {
     public static void info(Activity a,String title,String subtitle,String[][] rows){info(a,title,subtitle,rows,null);}
     /** {@code top}: an optional view (charts, a banner) shown above the rows. */
     public static void info(Activity a,String title,String subtitle,String[][] rows,View top){Dialog d=dialog(a);LinearLayout box=sheet(a,title,subtitle);LinearLayout body=new LinearLayout(a);body.setOrientation(LinearLayout.VERTICAL);ScrollView sv=new ScrollView(a);sv.addView(body);box.addView(sv,new LinearLayout.LayoutParams(-1,-2,1));if(top!=null)body.addView(top,lp(a,-1,-2));for(String[] row:rows){LinearLayout r=new LinearLayout(a);r.setOrientation(LinearLayout.VERTICAL);r.setPadding(dp(a,18),dp(a,10),dp(a,18),dp(a,10));TextView label=Ui.label(a,row[0],Ui.FAINT);r.addView(label);TextView value=Ui.body(a,row[1],Ui.TEXT);value.setTextIsSelectable(true);value.setPadding(0,dp(a,3),0,0);r.addView(value);body.addView(r,lp(a,-1,-2));}TextView done=button(a,"Done",Ui.BLUE,true);done.setGravity(Gravity.CENTER);done.setOnClickListener(v->d.dismiss());LinearLayout.LayoutParams p=lp(a,-1,50);p.setMargins(dp(a,12),dp(a,6),dp(a,12),dp(a,12));box.addView(done,p);present(a,d,box,false);}
-    public static void list(Activity a,String title,String subtitle,List<String> items){Dialog d=dialog(a);LinearLayout box=sheet(a,title,subtitle);ScrollView scroll=new ScrollView(a);LinearLayout list=new LinearLayout(a);list.setOrientation(LinearLayout.VERTICAL);for(String raw:items){String[] bits=raw.split("\\|",2);LinearLayout row=new LinearLayout(a);row.setOrientation(LinearLayout.VERTICAL);row.setPadding(dp(a,18),dp(a,10),dp(a,18),dp(a,10));row.setBackground(Ui.ripple(a,Ui.BAR,0));row.addView(Ui.body(a,bits[0],Ui.TEXT));if(bits.length>1)row.addView(Ui.caption(a,bits[1],Ui.SUB));list.addView(row,lp(a,-1,-2));}scroll.addView(list);box.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));present(a,d,box,true);}
+    public static void list(Activity a,String title,String subtitle,List<String> items){Dialog d=dialog(a);LinearLayout box=sheet(a,title,subtitle);ScrollView scroll=new ScrollView(a);LinearLayout list=new LinearLayout(a);list.setOrientation(LinearLayout.VERTICAL);for(String raw:items){String[] bits=raw.split("\\|",2);LinearLayout row=new LinearLayout(a);row.setOrientation(LinearLayout.VERTICAL);row.setPadding(dp(a,18),dp(a,10),dp(a,18),dp(a,10));row.setBackground(Ui.ripple(a,Color.TRANSPARENT,0));row.addView(Ui.body(a,bits[0],Ui.TEXT));if(bits.length>1)row.addView(Ui.caption(a,bits[1],Ui.SUB));list.addView(row,lp(a,-1,-2));}scroll.addView(list);box.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));present(a,d,box,true);}
 
     /** Long, asynchronously populated content with optional actions below the scroll area. */
     public static Dialog tall(Activity a,String title,String subtitle,View content,Item... actions){Dialog d=dialog(a);LinearLayout box=sheet(a,title,subtitle);box.addView(content,new LinearLayout.LayoutParams(-1,0,1));for(Item item:actions)box.addView(actionRow(a,d,item),lp(a,-1,64));present(a,d,box,true);return d;}
@@ -135,7 +135,12 @@ public final class Sheets {
     public static void concepts(Activity a, Concept current, Consumer<Concept> onPick) {
         Dialog d = dialog(a);
         LinearLayout box = sheet(a, "Theme", "Console or Refined styles, dark and light colour themes");
-        for (Concept c : Concept.ALL) {
+        ScrollView scroll = new ScrollView(a);
+        LinearLayout list = new LinearLayout(a);
+        list.setOrientation(LinearLayout.VERTICAL);
+        java.util.List<Concept> all = new java.util.ArrayList<>(java.util.Arrays.asList(Concept.ALL));
+        all.add(Concept.custom);
+        for (Concept c : all) {
             boolean selected = c.id.equals(current.id);
             LinearLayout row = new LinearLayout(a);
             row.setGravity(Gravity.CENTER_VERTICAL);
@@ -153,8 +158,10 @@ public final class Sheets {
             if (selected) { TextView check = text(a, "✓", 16, Ui.BLUE, true); check.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO); row.addView(check); }
             row.setContentDescription(c.name + (selected ? ", selected" : "") + ", " + c.blurb);
             row.setOnClickListener(v -> { d.dismiss(); if (!selected) onPick.accept(c); });
-            box.addView(row, lp(a, -1, -2));
+            list.addView(row, lp(a, -1, -2));
         }
+        scroll.addView(list);
+        box.addView(scroll, new LinearLayout.LayoutParams(-1, (int) (a.getResources().getDisplayMetrics().heightPixels * .6f)));
         present(a, d, box, false);
     }
 
@@ -184,8 +191,53 @@ public final class Sheets {
             row.setOnClickListener(v -> { d.dismiss(); if (!selected) onPick.accept(color); });
             list.addView(row, lp(a, -1, 52));
         }
+        boolean custom = current != 0 && java.util.Arrays.stream(Accent.COLORS).noneMatch(c -> c == current);
+        TextView own = Ui.body(a, custom ? String.format("Custom · #%06x", current & 0xffffff) : "Custom colour…", custom ? Ui.BLUE : Ui.TEXT);
+        own.setPadding(dp(a, 62), 0, dp(a, 16), 0); own.setGravity(Gravity.CENTER_VERTICAL);
+        own.setBackground(Ui.ripple(a, Color.TRANSPARENT, 0));
+        own.setOnClickListener(v -> { d.dismiss(); input(a, "Custom accent", "Hex colour, like 4f8ff7. It is adjusted to stay readable on your theme.",
+                custom ? String.format("%06x", current & 0xffffff) : "", "4f8ff7", value -> {
+                    Integer c = Accent.hex(value);
+                    if (c == null) android.widget.Toast.makeText(a, "Use 6 hex digits, like 4f8ff7", android.widget.Toast.LENGTH_SHORT).show();
+                    else onPick.accept(c);
+                }, "Use"); });
+        list.addView(own, lp(a, -1, 52));
         scroll.addView(list);
         box.addView(scroll, new LinearLayout.LayoutParams(-1, (int) (a.getResources().getDisplayMetrics().heightPixels * .6f)));
+        present(a, d, box, false);
+    }
+
+    /** Settings › Voice › Wake phrase: say it TRAIN_TIMES times; the count moves each time it is heard. Done stops early; Cancel discards. */
+    public static void wakeTraining(Activity a, String label, String tokens, Consumer<int[]> done) {
+        Dialog d = dialog(a);
+        LinearLayout box = sheet(a, "Say \u201c" + label + "\u201d", "Say it " + WakePhrase.TRAIN_TIMES
+                + " times in your normal voice, with a short pause each time. The count goes up when it's heard.");
+        TextView count = text(a, "0 / " + WakePhrase.TRAIN_TIMES, 40, Ui.TEXT, true);
+        count.setGravity(Gravity.CENTER); count.setPadding(0, dp(a, 12), 0, dp(a, 4));
+        box.addView(count, lp(a, -1, -2));
+        TextView status = Ui.caption(a, "Listening\u2026", Ui.SUB);
+        status.setGravity(Gravity.CENTER); status.setPadding(dp(a, 16), 0, dp(a, 16), dp(a, 12));
+        box.addView(status, lp(a, -1, -2));
+        WakeTraining run = new WakeTraining();
+        boolean[] abort = {false};
+        LinearLayout buttons = new LinearLayout(a);
+        buttons.setGravity(Gravity.END); buttons.setPadding(dp(a, 12), 0, dp(a, 12), dp(a, 12));
+        TextView cancel = button(a, "Cancel", Ui.SUB, false);
+        cancel.setOnClickListener(v -> d.cancel());
+        buttons.addView(cancel, lp(a, -2, 48));
+        TextView finish = button(a, "Done", Ui.BLUE, true);
+        finish.setOnClickListener(v -> run.cancel());
+        buttons.addView(finish, gapStart(a));
+        box.addView(buttons, lp(a, -1, -2));
+        d.setOnCancelListener(x -> { abort[0] = true; run.cancel(); });
+        new Thread(() -> {
+            try {
+                int[] hits = run.run(a, tokens, n -> a.runOnUiThread(() -> count.setText(n + " / " + WakePhrase.TRAIN_TIMES)));
+                a.runOnUiThread(() -> { if (abort[0]) return; if (d.isShowing()) d.dismiss(); done.accept(hits); });
+            } catch (Exception e) {
+                a.runOnUiThread(() -> status.setText("Couldn't listen: " + e.getMessage()));
+            }
+        }, "wake-training").start();
         present(a, d, box, false);
     }
 
@@ -364,7 +416,7 @@ public final class Sheets {
             LinearLayout row = new LinearLayout(a);
             row.setGravity(Gravity.CENTER_VERTICAL);
             row.setPadding(dp(a,18),dp(a,9),dp(a,16),dp(a,9));
-            row.setBackground(Ui.ripple(a,Ui.BAR,0));
+            row.setBackground(Ui.ripple(a,Color.TRANSPARENT,0));
             LinearLayout copy = new LinearLayout(a);
             copy.setOrientation(LinearLayout.VERTICAL);
             copy.addView(Ui.body(a, c.title, c.selected ? Ui.BLUE : Ui.TEXT));
@@ -402,8 +454,8 @@ public final class Sheets {
     }
 
 
-    private static View actionRow(Activity a,Dialog d,Item item){LinearLayout row=new LinearLayout(a);row.setGravity(Gravity.CENTER_VERTICAL);row.setPadding(dp(a,16),dp(a,4),dp(a,14),dp(a,4));row.setMinimumHeight(dp(a,56));row.setBackground(Ui.ripple(a,Ui.BAR,0));row.addView(item.avatar!=0?Ui.avatar(a,item.title,item.avatar,40):Ui.iconTile(a,item.icon,item.color),lp(a,40,40));LinearLayout copy=new LinearLayout(a);copy.setOrientation(LinearLayout.VERTICAL);copy.setPadding(dp(a,14),0,0,0);copy.addView(Ui.body(a,item.title,item.danger?Ui.RED:Ui.TEXT));TextView sub=null;if(item.bind!=null||item.subtitle!=null&&!item.subtitle.isEmpty()){sub=Ui.caption(a,item.subtitle==null?"":item.subtitle,Ui.SUB);copy.addView(sub);}row.addView(copy,new LinearLayout.LayoutParams(0,-2,1));if(item.bind!=null){TextView chip=Ui.caption(a,"",Ui.SUB);chip.setTypeface(Ui.WORD_SEMI);chip.setPadding(dp(a,8),dp(a,3),dp(a,8),dp(a,3));row.addView(chip,new LinearLayout.LayoutParams(-2,-2));item.bind.accept(chip,sub);}if(item.checked){TextView ck=Ui.title(a,"\u2713",Ui.BLUE);ck.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);ck.setPadding(dp(a,10),0,0,0);row.addView(ck);row.setContentDescription(item.title+", current");}row.setOnClickListener(v->{d.dismiss();if(item.action!=null)item.action.run();});return row;}
-    private static LinearLayout sheet(Activity a,String title,String subtitle){LinearLayout box=new LinearLayout(a);box.setOrientation(LinearLayout.VERTICAL);box.setBackground(Ui.card(a,3));Ui.elevate(box,3);box.setPadding(0,0,0,dp(a,8));View handle=new View(a);handle.setBackground(Ui.round(a,Ui.FAINT,99));LinearLayout.LayoutParams hp=lp(a,36,4);hp.gravity=Gravity.CENTER_HORIZONTAL;hp.setMargins(0,dp(a,8),0,dp(a,10));box.addView(handle,hp);TextView h=Ui.title(a,title,Ui.TEXT);h.setPadding(dp(a,18),0,dp(a,18),0);box.addView(h);if(subtitle!=null&&!subtitle.isEmpty()){TextView s=Ui.body(a,subtitle,Ui.SUB);s.setLineSpacing(0,1.15f);s.setPadding(dp(a,18),dp(a,4),dp(a,18),dp(a,12));box.addView(s);}else{View gap=new View(a);box.addView(gap,lp(a,1,8));}return box;}
+    private static View actionRow(Activity a,Dialog d,Item item){LinearLayout row=new LinearLayout(a);row.setGravity(Gravity.CENTER_VERTICAL);row.setPadding(dp(a,16),dp(a,4),dp(a,14),dp(a,4));row.setMinimumHeight(dp(a,56));row.setBackground(Ui.ripple(a,Color.TRANSPARENT,0));row.addView(item.avatar!=0?Ui.avatar(a,item.title,item.avatar,40):Ui.iconTile(a,item.icon,item.color),lp(a,40,40));LinearLayout copy=new LinearLayout(a);copy.setOrientation(LinearLayout.VERTICAL);copy.setPadding(dp(a,14),0,0,0);copy.addView(Ui.body(a,item.title,item.danger?Ui.RED:Ui.TEXT));TextView sub=null;if(item.bind!=null||item.subtitle!=null&&!item.subtitle.isEmpty()){sub=Ui.caption(a,item.subtitle==null?"":item.subtitle,Ui.SUB);copy.addView(sub);}row.addView(copy,new LinearLayout.LayoutParams(0,-2,1));if(item.bind!=null){TextView chip=Ui.caption(a,"",Ui.SUB);chip.setTypeface(Ui.WORD_SEMI);chip.setPadding(dp(a,8),dp(a,3),dp(a,8),dp(a,3));row.addView(chip,new LinearLayout.LayoutParams(-2,-2));item.bind.accept(chip,sub);}if(item.checked){TextView ck=Ui.title(a,"\u2713",Ui.BLUE);ck.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);ck.setPadding(dp(a,10),0,0,0);row.addView(ck);row.setContentDescription(item.title+", current");}row.setOnClickListener(v->{d.dismiss();if(item.action!=null)item.action.run();});return row;}
+    private static LinearLayout sheet(Activity a,String title,String subtitle){LinearLayout box=new LinearLayout(a);box.setOrientation(LinearLayout.VERTICAL);box.setBackground(Ui.card(a,3));Ui.elevate(box,3);box.setPadding(0,0,0,dp(a,8));View handle=new View(a);handle.setBackground(Ui.round(a,Ui.FAINT,99));LinearLayout.LayoutParams hp=lp(a,36,4);hp.gravity=Gravity.CENTER_HORIZONTAL;hp.setMargins(0,dp(a,8),0,dp(a,10));box.addView(handle,hp);TextView h=Ui.title(a,title,Ui.TEXT);h.setMaxLines(2);h.setEllipsize(android.text.TextUtils.TruncateAt.END);h.setPadding(dp(a,18),0,dp(a,18),0);box.addView(h);if(subtitle!=null&&!subtitle.isEmpty()){TextView s=Ui.body(a,subtitle,Ui.SUB);s.setLineSpacing(0,1.15f);s.setPadding(dp(a,18),dp(a,4),dp(a,18),dp(a,12));box.addView(s);}else{View gap=new View(a);box.addView(gap,lp(a,1,8));}return box;}
     private static Dialog dialog(Activity a){Dialog d=new Dialog(a);d.requestWindowFeature(Window.FEATURE_NO_TITLE);d.setCanceledOnTouchOutside(true);return d;}
     private static void present(Activity a,Dialog d,View content,boolean tall){if(a.isFinishing()||a.isDestroyed())return;FrameLayout frame=new FrameLayout(a);frame.setPadding(dp(a,8),dp(a,8),dp(a,8),dp(a,8));frame.addView(content,new FrameLayout.LayoutParams(-1,tall?(int)(a.getResources().getDisplayMetrics().heightPixels*.78f):-2,Gravity.BOTTOM));d.setContentView(frame);Window w=d.getWindow();if(w!=null){w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));w.setGravity(Gravity.BOTTOM);w.setWindowAnimations(R.style.SheetMotion);w.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);WindowManager.LayoutParams attrs=w.getAttributes();attrs.width=-1;attrs.height=-2;attrs.dimAmount=Ui.motionEnabled()?0f:.62f;w.setAttributes(attrs);}d.show();if(w!=null&&Ui.motionEnabled()){ValueAnimator dim=ValueAnimator.ofFloat(0f,.62f);dim.setDuration(200);dim.addUpdateListener(v->{if(!d.isShowing()){dim.cancel();return;}WindowManager.LayoutParams attrs=w.getAttributes();attrs.dimAmount=(float)v.getAnimatedValue();w.setAttributes(attrs);});dim.start();}}
     private static TextView button(Activity a,String s,int color,boolean bold){return bold?Ui.primaryButton(a,s,color):Ui.ghostButton(a,s,color);}

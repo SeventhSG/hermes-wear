@@ -353,7 +353,7 @@ public final class TerminalActivity extends Activity implements TermView.Host, T
         items.add(Sheets.Item.of(R.drawable.ic_terminal, Ui.BLUE, "Hub shell", "A shell on the server running Hermes", () -> open("hub", "hub")));
         for (TermStore.Entry h : store.hosts()) items.add(Sheets.Item.of(R.drawable.ic_server, Ui.BLUE, h.name, h.value, () -> open(h.value, h.name)));
         items.add(Sheets.Item.of(R.drawable.ic_link, Ui.BLUE, "Connect to a host…", "ssh from the hub: name, user@host or user@host:port", () ->
-                Sheets.input(this, "Connect to", "Reached from the hub, so any machine it can ssh to. Passwords are typed in the terminal.", "", "root@192.168.0.150", v -> {
+                Sheets.input(this, "Connect to", "Reached from the hub, so any machine it can ssh to. Passwords are typed in the terminal.", "", "root@192.168.1.150", v -> {
                     if (!TermStore.validTarget(v)) { toast("Not a valid host"); return; }
                     boolean known = false; for (TermStore.Entry h : store.hosts()) if (h.value.equals(v)) known = true;
                     if (!known) store.saveHost(v, v);

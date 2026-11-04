@@ -15,11 +15,9 @@ import android.graphics.Paint;
 import android.graphics.PixelFormat;
 import android.graphics.LinearGradient;
 import android.graphics.Outline;
-import android.graphics.RadialGradient;
 import android.graphics.RectF;
 import android.graphics.Shader;
 import android.view.HapticFeedbackConstants;
-import android.view.animation.LinearInterpolator;
 import android.view.animation.OvershootInterpolator;
 import android.graphics.Rect;
 import android.graphics.Typeface;
@@ -91,7 +89,7 @@ public final class Ui {
     /** Word typeface for a concept's style (used by previews that show a style other than the active one). */
     static Typeface wordFont(Concept k){return k.style==Concept.Style.CONSOLE&&sgReg!=null?sgReg:Typeface.DEFAULT;}
     /** Load the stored concept (cheap: SharedPreferences are cached). */
-    public static void apply(Context c){SettingsStore s=new SettingsStore(c);fonts(c);use(Concept.byId(s.uiConcept()));accent(s.uiAccent());layout=Layout.byId(s.uiLayout());}
+    public static void apply(Context c){SettingsStore s=new SettingsStore(c);Concept.custom=Concept.custom(s.uiCustomBg());fonts(c);use(Concept.byId(s.uiConcept()));accent(s.uiAccent());layout=Layout.byId(s.uiLayout());}
     /** Re-colour the interactive tokens with the user's accent (0 = keep the theme's own). Call right after {@link #use}. */
     static void accent(int argb){
         if(argb==0||concept==null)return;
@@ -256,47 +254,12 @@ public final class Ui {
         a.start();
     }
 
-    /** Ui.BG with two very faint accent glows drifting slowly; static when motion is off, paused while detached. */
-    public static void ambient(View v){
-        AmbientDrawable d=new AmbientDrawable();
-        v.setBackground(d);
-        v.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener(){
-            public void onViewAttachedToWindow(View x){d.run(true);}
-            public void onViewDetachedFromWindow(View x){d.run(false);}
-        });
-        if(v.isAttachedToWindow())d.run(true);
-    }
-    private static final class AmbientDrawable extends Drawable{
-        private final Paint a=new Paint(Paint.ANTI_ALIAS_FLAG),b=new Paint(Paint.ANTI_ALIAS_FLAG);
-        private ValueAnimator anim;private float phase;private float r;private long last;
-        void run(boolean on){
-            if(anim!=null){anim.cancel();anim=null;}
-            if(!on||!motionEnabled())return;
-            anim=ValueAnimator.ofFloat(0f,(float)(2*Math.PI));anim.setDuration(16000);
-            anim.setRepeatCount(ValueAnimator.INFINITE);anim.setInterpolator(new LinearInterpolator());
-            // ~12 fps is indistinguishable for a 26 s drift and keeps full-screen redraws off the scroll path.
-            anim.addUpdateListener(x->{long now=android.os.SystemClock.uptimeMillis();if(now-last<80)return;last=now;phase=(float)x.getAnimatedValue();invalidateSelf();});
-            anim.start();
-        }
-        // Views call setVisible(false) when their window goes away (screen off, another app on top): stop animating then.
-        @Override public boolean setVisible(boolean visible,boolean restart){boolean changed=super.setVisible(visible,restart);if(changed)run(visible);return changed;}
-        @Override protected void onBoundsChange(Rect bb){
-            r=Math.max(bb.width(),bb.height())*.6f;
-            if(r<=0)return;
-            a.setShader(new RadialGradient(0,0,r,(BLUE&0xffffff)|0x38000000,BLUE&0xffffff,Shader.TileMode.CLAMP));
-            b.setShader(new RadialGradient(0,0,r,(0x8b6aae&0xffffff)|0x30000000,0x8b6aae,Shader.TileMode.CLAMP));
-        }
-        @Override public void draw(Canvas c){
-            Rect bb=getBounds();c.drawColor(BG);
-            if(r<=0)return;
-            float w=bb.width(),h=bb.height();
-            int s=c.save();c.translate(w*(.25f+.2f*(float)Math.sin(phase)),h*(.2f+.12f*(float)Math.cos(phase)));c.drawCircle(0,0,r,a);c.restoreToCount(s);
-            s=c.save();c.translate(w*(.8f-.2f*(float)Math.cos(phase)),h*(.85f-.12f*(float)Math.sin(phase)));c.drawCircle(0,0,r,b);c.restoreToCount(s);
-        }
-        @Override public void setAlpha(int x){}
-        @Override public void setColorFilter(ColorFilter f){}
-        @Override public int getOpacity(){return PixelFormat.OPAQUE;}
-    }
+    /** Line height as a multiple of the text size. Space Grotesk's tall metrics make setLineSpacing(0, x) far looser than x. */
+    public static void leading(TextView t,float x){if(Build.VERSION.SDK_INT>=28)t.setLineHeight(Math.round(t.getTextSize()*x));else t.setLineSpacing(0,1.05f);}
+    /** A row's trailing chevron, pointing right (rotate to 0 for "open"). The fonts draw › like a plain >. */
+    public static ImageView chevron(Context c){ImageView v=new ImageView(c);v.setImageResource(R.drawable.ic_chevron);v.setRotation(-90);v.setImageTintList(ColorStateList.valueOf(FAINT));v.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);return v;}
+    /** Plain Ui.BG behind a screen: flat ground like Claude and ChatGPT, no glows. */
+    public static void ambient(View v){v.setBackgroundColor(BG);}
     public static void pressFeedback(View v){
         v.setOnTouchListener((target,event)->{
             int action=event.getActionMasked();
@@ -340,6 +303,7 @@ public final class Ui {
     public static Drawable press(Context c,int fill,int stroke,int radius){return new RippleDrawable(ColorStateList.valueOf((BLUE&0xffffff)|0x33000000),stroke(c,fill,stroke,radius),round(c,Color.WHITE,radius));}
     /** A 40dp-high pill button: optional tinted icon + label, ripple, concept-scaled corners. */
     public static TextView pillButton(Context c,String label,int iconRes,int fill,int stroke,int color){
+        if(color==Color.WHITE&&Color.alpha(fill)==255){fill=Accent.fillForWhiteText(fill);if(stroke!=Color.TRANSPARENT)stroke=fill;}
         TextView b=text(c,label,13,color,true);b.setGravity(Gravity.CENTER);b.setMinHeight(dp(c,40));b.setMinWidth(dp(c,40));
         b.setPadding(dp(c,14),0,dp(c,14),0);b.setBackground(press(c,fill,stroke,20));b.setClickable(true);
         if(iconRes!=0){Drawable d=c.getDrawable(iconRes).mutate();d.setTint(color);d.setBounds(0,0,dp(c,16),dp(c,16));b.setCompoundDrawablesRelative(d,null,null,null);b.setCompoundDrawablePadding(dp(c,6));}
@@ -358,7 +322,7 @@ public final class Ui {
     /** The one filled action in a group (accent fill, white label, 48dp). */
     public static TextView primaryButton(Context c,String label){return primaryButton(c,label,BLUE);}
     /** Primary in a signal colour (e.g. RED for a destructive confirm). */
-    public static TextView primaryButton(Context c,String label,int fill){return button(c,label,Color.WHITE,buttonBg(c,fill,0,0x33ffffff));}
+    public static TextView primaryButton(Context c,String label,int fill){return button(c,label,Color.WHITE,buttonBg(c,Accent.fillForWhiteText(fill),0,0x33ffffff));}
     /** Secondary: raised tier fill, hairline, normal text. */
     public static TextView secondaryButton(Context c,String label){return button(c,label,TEXT,buttonBg(c,tier(2),LINE,(BLUE&0xffffff)|0x22000000));}
     /** Ghost: no fill, coloured label (cancel, deny, dismiss). */
@@ -386,7 +350,14 @@ public final class Ui {
      * (not Concept colours) so it reads as a badge on every theme, including Paper's light background.
      * Path/shader are built once per size in onSizeChanged, not per frame.
      */
-    public static View hermesLogo(Context c,int size){return new HermesLogoView(c,size);}
+    public static View hermesLogo(Context c,int size){
+        android.graphics.Bitmap b=Brand.logo(c);
+        if(b==null)return new HermesLogoView(c,size);
+        ImageView v=new ImageView(c);v.setImageBitmap(b);v.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        v.setOutlineProvider(new android.view.ViewOutlineProvider(){public void getOutline(View x,android.graphics.Outline o){o.setOval(0,0,x.getWidth(),x.getHeight());}});
+        v.setClipToOutline(true);v.setMinimumWidth(dp(c,size));v.setMinimumHeight(dp(c,size));v.setContentDescription(Brand.name(c,"Hermes")+" logo");
+        return v;
+    }
     /** Icon V5e (matches the launcher icon): glossy blue orb, stencil H, tilted orbit with one node. Drawn in the 108-unit icon grid. */
     private static final class HermesLogoView extends View {
         private static final android.graphics.Path H=new android.graphics.Path(),BACK=new android.graphics.Path(),FRONT=new android.graphics.Path();
@@ -535,12 +506,12 @@ public final class Ui {
     public static int tier(int t){return concept.tier(t);}
     /** Control corner radius in px (buttons, inputs, tiles). */
     public static float controlRadius(Context c){return dp(c,1)*concept.controlRadius;}
-    /** Real elevation by tier (API 28+ adds accent-tinted shadows on dark Console, neutral elsewhere). Needs a background with an outline (Ui.card has one). */
+    /** Real elevation by tier (neutral shadows; warm on light themes). Needs a background with an outline (Ui.card has one). */
     public static void elevate(View v,int tier){
         float d=v.getResources().getDisplayMetrics().density;
         v.setElevation(d*(tier<=0?0:tier==1?2:tier==2?6:12));
         if(Build.VERSION.SDK_INT>=28){
-            int tint=concept.light?0xff3a3226:concept.style==Concept.Style.CONSOLE&&tier>=2?0xff000000|(BLUE&0xffffff):0xff000000;
+            int tint=concept.light?0xff3a3226:0xff000000;
             v.setOutlineAmbientShadowColor(tint);v.setOutlineSpotShadowColor(tint);
         }
     }

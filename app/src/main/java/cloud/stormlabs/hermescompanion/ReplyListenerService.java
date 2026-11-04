@@ -14,25 +14,28 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-/** Opt-in notification bridge. The source app's reply action never fires until Send is tapped. */
+/** Opt-in notification bridge: suggests replies to new messages. The source app's reply action never fires until Send is tapped. */
 public final class ReplyListenerService extends NotificationListenerService {
     static final String[][] SUGGESTED_APPS = {
             {"com.instagram.android", "Instagram"}, {"com.whatsapp", "WhatsApp"}, {"org.telegram.messenger", "Telegram"},
             {"com.facebook.orca", "Messenger"}, {"com.viber.voip", "Viber"},
             {"org.thoughtcrime.securesms", "Signal"}, {"com.google.android.apps.messaging", "Google Messages"},
             {"com.samsung.android.messaging", "Samsung Messages"}, {"com.google.android.gm", "Gmail"}};
-    static final long LIFETIME_MS = 10 * 60 * 1000L;
+    static final long LIFETIME_MS = 24 * 3600 * 1000L, MAX_SOURCES = 100; // what get_messages can still show Hermes
     static final Map<String, Source> SOURCES = new ConcurrentHashMap<>();
 
     static final class Source {
         final Notification.Action action;
         final RemoteInput input;
         final String app, sender, message;
+        final boolean group;
         final long seen = System.currentTimeMillis();
+        volatile boolean gone; // the notification was dismissed or read in its app: keep it for get_messages, never reply through it
         String draft;
-        boolean canSend() { return action != null && input != null; }
-        Source(Notification.Action action, RemoteInput input, String app, String sender, String message) {
-            this.action = action; this.input = input; this.app = app; this.sender = sender; this.message = message;
+        ReplyExtract.Suggestion suggestion;
+        boolean canSend() { return !gone && action != null && input != null; }
+        Source(Notification.Action action, RemoteInput input, String app, String sender, String message, boolean group) {
+            this.action = action; this.input = input; this.app = app; this.sender = sender; this.message = message; this.group = group;
         }
         boolean fresh() { return System.currentTimeMillis() - seen < LIFETIME_MS; }
     }
@@ -40,16 +43,18 @@ public final class ReplyListenerService extends NotificationListenerService {
     @Override public void onNotificationPosted(StatusBarNotification sbn) {
         try { NotificationReader.consider(this, sbn, importanceOf(sbn)); } catch (Throwable ignored) { /* reading aloud must never break reply drafting */ }
         SettingsStore store = new SettingsStore(this);
-        if (!store.replyDrafting() || store.agentPaused() || !store.replyApps().contains(sbn.getPackageName())) return;
+        if (!store.replyDrafting() || store.agentPaused() || getPackageName().equals(sbn.getPackageName()) || !store.replyWatches(sbn.getPackageName())) return;
         SOURCES.entrySet().removeIf(entry -> !entry.getValue().fresh());
         Notification n = sbn.getNotification();
         if (n == null || (n.flags & Notification.FLAG_GROUP_SUMMARY) != 0) return;
         Bundle extras = n.extras;
         if (extras == null) return;
+        List<ReplyExtract.Msg> msgs = messages(extras);
+        boolean group = extras.getBoolean("android.isGroupConversation");
         ReplyExtract.Result r = ReplyExtract.extract(false, str(extras.getCharSequence(Notification.EXTRA_TITLE)),
                 str(extras.getCharSequence(Notification.EXTRA_TEXT)), str(extras.getCharSequence("android.conversationTitle")),
-                extras.getBoolean("android.isGroupConversation"), messages(extras));
-        if (r == null) return;
+                group, msgs);
+        if (r == null || ReplyExtract.fromHermes(r.sender, str(extras.getCharSequence("android.conversationTitle")))) return;
         Notification.Action replyAction = null;
         RemoteInput replyInput = null;
         if (n.actions != null) {
@@ -62,15 +67,23 @@ public final class ReplyListenerService extends NotificationListenerService {
                 if (replyInput != null) break;
             }
         }
+        // Watching every app: only conversations (a message list, a typed-reply action or the message category), not downloads or players.
+        if (store.replyAllApps() && msgs.isEmpty() && replyInput == null && !Notification.CATEGORY_MESSAGE.equals(n.category)) return;
         String key = sbn.getKey();
-        Source source = new Source(replyAction, replyInput, sbn.getPackageName(), r.sender, r.message);
+        Source source = new Source(replyAction, replyInput, sbn.getPackageName(), r.sender, r.message, group);
         Source old = SOURCES.putIfAbsent(key, source);
         if (old != null) {
             if (old.message.equals(source.message)) return;
             SOURCES.put(key, source);
         }
+        while (SOURCES.size() > MAX_SOURCES) {
+            String oldest = null;
+            for (Map.Entry<String, Source> e : SOURCES.entrySet()) if (oldest == null || e.getValue().seen < SOURCES.get(oldest).seen) oldest = e.getKey();
+            SOURCES.remove(oldest);
+        }
         ActivityLog.log(this, "listener", "Read message · " + source.app, source.sender + ": " + source.message, true, null);
-        Notifier.replyOffer(this, key, source.sender);
+        // Read quietly (only a plan pops up). With a suggestion for every message, busy group chats ask first instead.
+        if (group && store.replyEveryMessage()) Notifier.replyOffer(this, key, source.sender); else ReplyDraftReceiver.suggest(this, key);
     }
 
     /** The channel importance the user gave this notification (-1 when unknown). */
@@ -140,7 +153,8 @@ public final class ReplyListenerService extends NotificationListenerService {
     }
 
     @Override public void onNotificationRemoved(StatusBarNotification sbn) {
-        SOURCES.remove(sbn.getKey());
+        Source s = SOURCES.get(sbn.getKey());
+        if (s != null) s.gone = true;
         Notifier.cancelReplyDraft(this, sbn.getKey());
     }
 }

@@ -364,9 +364,7 @@ public final class MediaActivity extends Activity {
         LinearLayout c = new LinearLayout(this);
         c.setOrientation(LinearLayout.VERTICAL);
         c.setPadding(dp(18), dp(16), dp(18), dp(14));
-        android.graphics.drawable.GradientDrawable g = Arr.glow(Arr.QBIT);
-        g.setCornerRadius(dp(18));
-        c.setBackground(g);
+        c.setBackground(Ui.card(this, 1));
         LinearLayout.LayoutParams lp = wrap(); lp.bottomMargin = dp(6);
         dest.addView(c, lp);
 

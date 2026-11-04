@@ -294,7 +294,7 @@ public final class DeviceActions {
                 + "- capture {text}  (files a note into the user's capture inbox)\n"
                 + "\nPHONE QUERIES (read-only; the app runs them and sends the results back to you as the next message, "
                 + "starting with [PHONE RESULTS], so you can continue the task — e.g. read the calendar, then create an event in a free slot):\n"
-                + "- get_messages {}  (messages from the last 10 minutes in the chat apps the user opted in, each with an id)\n"
+                + "- get_messages {}  (messages from the last 24 hours in the chat apps Hermes watches, each with an id; read ones can no longer be answered with reply)\n"
                 + "- get_calendar {days? 1-14}\n"
                 + "- find_contact {name}  (returns matching names and numbers)\n"
                 + "- list_apps {query?}\n"

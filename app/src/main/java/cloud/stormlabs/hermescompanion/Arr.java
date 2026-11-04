@@ -3,7 +3,6 @@ package cloud.stormlabs.hermescompanion;
 import android.app.Activity;
 import android.graphics.Bitmap;
 import android.graphics.Color;
-import android.graphics.drawable.GradientDrawable;
 import android.text.TextUtils;
 import android.util.LruCache;
 import android.view.Gravity;
@@ -203,7 +202,7 @@ final class Arr {
     static TextView chip(Activity a, String label, boolean on, int accent, View.OnClickListener tap) {
         TextView c = Ui.text(a, label, 13, on ? on(accent) : Ui.SUB, on);
         c.setPadding(dp(a, 14), dp(a, 7), dp(a, 14), dp(a, 7));
-        c.setBackground(on ? Ui.round(a, accent, 99) : Ui.stroke(a, Color.TRANSPARENT, Ui.LINE, 99));
+        c.setBackground(on ? Ui.round(a, accent, 99) : Ui.round(a, Ui.tier(2), 99));
         c.setOnClickListener(tap);
         c.setSingleLine(true);
         return c;
@@ -245,7 +244,7 @@ final class Arr {
         TextView t = Ui.title(a, title, Ui.TEXT);
         h.addView(t, new LinearLayout.LayoutParams(0, -2, 1));
         if (action != null) {
-            TextView act = Ui.text(a, action + "  ›", 13, accent, true);
+            TextView act = Ui.text(a, action, 13, Ui.BLUE, true); // one link colour; the service colours stay on their own cards
             act.setPadding(dp(a, 8), dp(a, 4), 0, dp(a, 4));
             act.setOnClickListener(tap);
             h.addView(act);
@@ -343,8 +342,4 @@ final class Arr {
         return (int) ((wdp - 24 - (cols - 1) * 10) / cols);
     }
 
-    static GradientDrawable glow(int color) {
-        GradientDrawable g = new GradientDrawable(GradientDrawable.Orientation.TL_BR, new int[]{alpha(color, 0x55), alpha(color, 0x14)});
-        return g;
-    }
 }

@@ -20,8 +20,8 @@ class TermSessions(unittest.TestCase):
 
     def test_ssh_command_line(self):
         self.assertEqual(ts.ssh_argv("kit")[-2:], ["--", "kit"])
-        a = ts.ssh_argv("root@192.168.0.150:2222")
-        self.assertEqual((a[-4:-2], a[-2:]), (["-p", "2222"], ["--", "root@192.168.0.150"]))
+        a = ts.ssh_argv("root@192.168.1.150:2222")
+        self.assertEqual((a[-4:-2], a[-2:]), (["-p", "2222"], ["--", "root@192.168.1.150"]))
 
     def test_shell_echo_resize_and_close(self):
         sid = ts.open_session("hub", self.hosts, 24, 100, persist=False)

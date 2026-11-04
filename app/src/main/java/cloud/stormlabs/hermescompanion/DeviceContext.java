@@ -49,7 +49,12 @@ final class DeviceContext {
                 + "write MEDIA:/absolute/path/to/file on its own line: images show inline, PDFs as a preview card, and any other file "
                 + "(CSV, audio, video, documents, archives) as a card they can open. Use a MEDIA: line for every file you send, never a "
                 + "bare path. Save generated files first, then send the tag. "
-                + "This overrides any earlier instruction to use plain text or to avoid MEDIA: tags.\n");
+                + "This overrides any earlier instruction to use plain text or to avoid MEDIA: tags.\n"
+                + "LIVE PAGES: when something visual or interactive beats text (an infographic, chart, dashboard, timeline, comparison, "
+                + "calculator, quiz, checklist, small game or tool), write ONE complete self-contained HTML page in a ```html fenced block: "
+                + "the app runs it live in the chat, like an artifact, with a full-screen button. JavaScript works and libraries may load "
+                + "from cdn.jsdelivr.net or cdnjs.cloudflare.com; the page cannot reach the phone, the server or local files. Design for a "
+                + "phone (about 400px wide, touch targets, no hover), set a <title>, and put any data inline. Keep normal answers as text.\n");
         if (voice) b.append("\nVOICE MODE: the user is on a live voice call with you and your reply is read aloud sentence by sentence as you write it. "
                 + "Open with a short natural sentence at once (the answer, or what you are about to do, e.g. \"Checking the cluster.\") before you use "
                 + "any tool, so they hear you straight away. Then answer in one to three short sentences unless they ask for detail. "

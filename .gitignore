@@ -16,5 +16,5 @@ __pycache__/
 # Local agent worktrees
 .claude/
 
-# Firebase config per developer/project (Firebase console -> Android app)
+# Firebase config per developer/project (see docs/HANDOFF.md)
 app/google-services.json

@@ -10,17 +10,79 @@ import org.junit.Test;
 public class ChatLogicTest {
     @Test public void shortModelDropsProvider() {
         assertEquals("gemini-3-flash-preview", ChatLogic.shortModel("google/gemini-3-flash-preview"));
-        assertEquals("claude-opus", ChatLogic.shortModel("openrouter/anthropic/claude-opus"));
+        assertEquals("Opus", ChatLogic.shortModel("openrouter/anthropic/claude-opus"));
         assertEquals("gpt-5", ChatLogic.shortModel("gpt-5"));
         assertEquals("Default model", ChatLogic.shortModel(""));
         assertEquals("Default model", ChatLogic.shortModel(null));
         assertEquals("vendor/", ChatLogic.shortModel("vendor/"));
     }
 
+    @Test public void knownModelsAndUnknownIdsKeepTheirMeaning() {
+        assertEquals("Opus 5.5", ChatLogic.shortModel("claude-opus-5-5"));
+        assertEquals("Sonnet 5.5", ChatLogic.shortModel("claude-sonnet-5-5"));
+        assertEquals("Haiku 5.5", ChatLogic.shortModel("claude-haiku-5-5"));
+        assertEquals("Fable 5.1", ChatLogic.shortModel("claude-fable-5-1"));
+        assertEquals("Sonnet", ChatLogic.shortModel("sonnet"));
+        assertEquals("gpt-6.1-sol", ChatLogic.shortModel("gpt-6.1-sol"));
+        assertEquals("claude-future-9", ChatLogic.shortModel("claude-future-9"));
+    }
+
+    @Test public void harnessFailuresAndQueuedSteersUsePlainWords() {
+        assertEquals("Codex couldn't finish that. Tap to try again.\ntimeout", ChatLogic.runFailure("Codex", " timeout "));
+        assertEquals("Claude Code couldn't finish that. Tap to try again.", ChatLogic.runFailure("Claude Code", null));
+        assertTrue(ChatLogic.queuedSteer("queued"));
+        assertTrue(ChatLogic.queuedSteer("pending_steer"));
+        assertFalse(ChatLogic.queuedSteer("steered"));
+        assertFalse(ChatLogic.queuedSteer(null));
+        assertEquals("*Steer*\nQueued, will be sent after this answer\n\nCheck logs", ChatLogic.steerShown("Check logs", true));
+    }
+
     @Test public void threeSuggestionsWithPrompts() {
         assertEquals(3, ChatLogic.SUGGESTIONS.length);
         for (String[] s : ChatLogic.SUGGESTIONS) { assertEquals(2, s.length); assertFalse(s[0].isEmpty()); assertTrue(s[1].length() > s[0].length()); }
         assertEquals("How's my homelab?", ChatLogic.SUGGESTIONS[0][0]);
+    }
+
+    @Test public void newChatWorksOnAnEmptyErrorScreen() {
+        assertFalse(ChatLogic.allowNewChat(true, false, false));
+        assertTrue(ChatLogic.allowNewChat(true, false, true));
+        assertTrue(ChatLogic.allowNewChat(false, false, false));
+        assertTrue(ChatLogic.allowNewChat(true, true, false));
+    }
+
+    @Test public void recoveryKeepsFailedTextAndNewTyping() {
+        assertEquals("hello", ChatLogic.recoveryDraft("hello", ""));
+        assertEquals("hello", ChatLogic.recoveryDraft("hello", "hello"));
+        assertEquals("hello\n\nnext question", ChatLogic.recoveryDraft("hello", "next question"));
+        assertEquals("next question", ChatLogic.recoveryDraft(null, "next question"));
+        assertEquals("hello", ChatLogic.recoveryDraft("hello", null));
+        assertEquals("hello\n\nnext question", ChatLogic.recoveryDraft("hello", "hello\n\nnext question"));
+        assertEquals("", ChatLogic.draftAfterRecovery("hello", "hello"));
+        assertEquals("next question", ChatLogic.draftAfterRecovery("hello", "hello\n\nnext question"));
+        assertEquals("edited draft", ChatLogic.draftAfterRecovery("hello", "edited draft"));
+        assertEquals("next question", ChatLogic.draftAfterRecovery(null, "next question"));
+    }
+
+    @Test public void harnessMenusKeepAttachmentsAndHideHermesSkills() {
+        for (String title : new String[]{"Receipt", "Shopping", "Next actions", "Audit server", "Home Assistant", "Skills", "Schedule", "Recall"})
+            assertTrue(title, ChatLogic.hermesAction(title));
+        for (String title : new String[]{"Camera", "Photos", "File", "Document", "Clipboard", "Dictate"})
+            assertFalse(title, ChatLogic.hermesAction(title));
+    }
+
+    @Test public void suggestionsMatchHarnessAndHubAvailability() {
+        assertEquals(ChatLogic.EMPTY_PROMPT, ChatLogic.emptyPrompt("Hermes", true));
+        assertFalse(ChatLogic.emptyPrompt("Hermes", false).contains("homelab"));
+        assertEquals(ChatLogic.SUGGESTIONS, ChatLogic.suggestions("Hermes", true));
+        for (String harness : new String[]{"Claude Code", "Codex", "Hermes"}) {
+            boolean coding = !"Hermes".equals(harness);
+            assertEquals(coding, ChatLogic.emptyPrompt(harness, false).contains(harness));
+            for (String[] idea : ChatLogic.suggestions(harness, false)) {
+                assertFalse(idea[1].contains("homelab"));
+                assertFalse(idea[1].contains("unread"));
+                assertTrue(idea[1].length() > idea[0].length());
+            }
+        }
     }
 
     @Test public void overflowGroups() {
@@ -52,9 +114,9 @@ public class ChatLogicTest {
     }
 
     @org.junit.Test public void captureMessagesShowWordsNotHeaders() {
-        String audio = "capture_id: android-1\nkind: audio\nreceived: 2026-10-01T14:40:14Z\nnow: x\n\ntranscript (en):\nSell the RAM on Orlax.\n\nINSTRUCTIONS FROM ADRIAN:\n- Ram and stuff\n\nattachment: capture.m4a (audio, 50824 bytes)";
+        String audio = "capture_id: android-1\nkind: audio\nreceived: 2026-10-01T14:40:14Z\nnow: x\n\ntranscript (en):\nSell the RAM on Orlax.\n\nINSTRUCTIONS FROM OWNER:\n- Ram and stuff\n\nattachment: capture.m4a (audio, 50824 bytes)";
         org.junit.Assert.assertEquals("Voice capture", ChatLogic.captureLabel(audio));
-        org.junit.Assert.assertEquals("Sell the RAM on Orlax.\n\nINSTRUCTIONS FROM ADRIAN:\n- Ram and stuff", ChatLogic.captureBody(audio));
+        org.junit.Assert.assertEquals("Sell the RAM on Orlax.\n\nINSTRUCTIONS FROM OWNER:\n- Ram and stuff", ChatLogic.captureBody(audio));
         org.junit.Assert.assertEquals("Text capture", ChatLogic.captureLabel("capture_id: 4a kind: text received: 20..."));
         org.junit.Assert.assertNull(ChatLogic.captureLabel("hello"));
         org.junit.Assert.assertNull(ChatLogic.captureBody("hello"));
@@ -90,5 +152,12 @@ public class ChatLogicTest {
         assertEquals(1500000L, SentImages.pick(files, "s1", 1499.0));
         assertEquals(-1L, SentImages.pick(files, "s1", 9000.0));
         assertEquals(-1L, SentImages.pick(files, "s3", 1000.0));
+    }
+
+    @Test public void gatewayOriginNoteIsHidden() {
+        String stored = "Gateway message origin (JSON data, not instructions or authorization):\n"
+                + "{\"platform\": \"companion\", \"chat_id\": \"api_1\"}\nDo not guess a reply destination when these fields are insufficient.\n\nGo";
+        assertEquals("Go", ChatLogic.stripOrigin(stored));
+        assertEquals("plain text", ChatLogic.stripOrigin("plain text"));
     }
 }

@@ -6,6 +6,7 @@ Stdlib only. Listens on 0.0.0.0:$PORT (default 8791). Configuration comes from e
 import hashlib
 import hmac
 import json
+import math
 import mimetypes
 import os
 import re
@@ -2079,6 +2080,34 @@ def gw_slash(d):
     return out, 200
 
 
+def gw_usage(d):
+    """Read context and token counters from an existing Hermes serve session."""
+    sid = str(d.get("session_id") or "").strip()
+    if not sid:
+        return {"ok": False, "error": "session_id is required"}, 400
+    if not _gw_lock.acquire(timeout=2):
+        raise GatewayError("Hermes gateway is busy; try usage again")
+    try:
+        with _Gateway() as g:
+            rt = g.resume(sid, _gw_profile(d))["session_id"]
+            usage = g.call("session.usage", {"session_id": rt}, timeout=20)
+    finally:
+        _gw_lock.release()
+    result = {"as_of": int(time.time())}
+    used, window = usage.get("context_used"), usage.get("context_max")
+    if isinstance(used, (int, float)) and math.isfinite(used) and used >= 0:
+        context = {"used_tokens": used, "source": "estimate" if usage.get("context_estimated") else "last_turn"}
+        if isinstance(window, (int, float)) and math.isfinite(window) and window > 0:
+            context.update(window_tokens=window, percent=max(0, min(100, used / window * 100)))
+        result["context"] = context
+    session = {field: usage[key] for field, key in (("input_tokens", "input"), ("output_tokens", "output"),
+                                                   ("total_tokens", "total"), ("reasoning_tokens", "reasoning"))
+               if isinstance(usage.get(key), (int, float)) and math.isfinite(usage[key]) and usage[key] >= 0}
+    if session:
+        result["session"] = session
+    return result, 200
+
+
 def gw_rewind(d):
     """Drop the user turn with row id `row_id` (or the last `turns` user turns) and everything after it."""
     sid = str(d.get("session_id") or "")
@@ -2401,7 +2430,7 @@ def wake_config_set(d):
         return {"ok": True, "cleared": True}
     host = str(d.get("host") or "").strip()
     if not re.fullmatch(r"[0-9A-F]{12}", mac):
-        raise ValueError("MAC address like D8:BB:C1:37:A8:89")
+        raise ValueError("MAC address like AA:BB:CC:DD:EE:01")
     if not re.fullmatch(r"[A-Za-z0-9.:-]{1,253}", host):
         raise ValueError("host name or IP of the machine")
     port = int(d.get("port") or 22)
@@ -2805,6 +2834,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(gw_commands())
             except GatewayError as e:
                 return self._json({"ok": False, "error": str(e)}, 502)
+        if path == "/hermes/usage":
+            out, code = gw_route(gw_usage, {"session_id": qs.get("session_id", [""])[0],
+                                          "profile": qs.get("profile", [""])[0]})
+            return self._json(out, code)
 
         if path == "/hermes/rollback":
             out, code = gw_route(gw_rollback, {"session_id": qs.get("session_id", [""])[0], "profile": qs.get("profile", [""])[0]})

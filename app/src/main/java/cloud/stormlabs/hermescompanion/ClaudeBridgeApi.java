@@ -39,6 +39,6 @@ public final class ClaudeBridgeApi extends HermesApi {
         return HermesApi.Result.error("Claude Code bridge does not support jobs yet");
     }
     @Override public JSONObject healthDetailed() throws Exception {
-        throw new UnsupportedOperationException("Claude Code bridge does not support detailed health yet");
+        return capabilities().put("gateway_state", "running"); // the System screen reads this; a reply means the bridge is up
     }
 }

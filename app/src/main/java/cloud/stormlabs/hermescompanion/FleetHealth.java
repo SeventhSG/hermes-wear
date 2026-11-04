@@ -41,7 +41,7 @@ final class FleetHealth {
         return new Status(ok ? ONLINE : DEGRADED, v.startsWith("v") ? v.substring(1) : v, "");
     }
 
-    /** "stormserve 38% CPU · 2 problems" */
+    /** "pve1 38% CPU · 2 problems" */
     static String hint(LabSummary s) {
         String h = (s.node.isEmpty() ? "" : s.node + " ") + LabSummary.pct(s.cpu) + " CPU";
         return s.problems == 0 ? h : h + String.format(Locale.US, " · %d problem%s", s.problems, s.problems == 1 ? "" : "s");

@@ -111,13 +111,14 @@ public final class HermesVoiceSession extends VoiceInteractionSession implements
         Ui.apply(getContext());
         apiProfile = store.profileId();
         api = Backends.create(store, apiProfile);
+        apiTarget = store.serverType() + " " + store.endpoint();
         runs = RunManager.get(getContext());
         // The typed-input keyboard must lift the sheet (via IME insets), not cover it.
         try { android.view.Window w = getWindow() == null ? null : getWindow().getWindow(); if (w != null) w.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE); } catch (Throwable ignored) {}
     }
 
     /** The session outlives hide(): after a profile switch it must not keep talking to the old profile. */
-    private String apiProfile;
+    private String apiProfile, apiTarget; // apiTarget: harness and address the client was built for
 
     /** A span whose alpha is animated: word-by-word transcript fade and the blinking reply cursor. */
     private static final class FadeSpan extends android.text.style.CharacterStyle {
@@ -200,16 +201,30 @@ public final class HermesVoiceSession extends VoiceInteractionSession implements
         transcriptLine = Ui.title(c, "", Ui.TEXT);
         transcriptLine.setPadding(dp(c, 16), dp(c, 4), dp(c, 16), dp(c, 8));
         transcriptLine.setLineSpacing(0, 1.12f);
+        transcriptLine.setMaxLines(4); // long dictation keeps its newest words in view (see setTranscript)
+        transcriptLine.setVerticalScrollBarEnabled(false);
         transcriptLine.setVisibility(View.GONE); // shown once there are words, so an idle sheet has no empty band
         transcriptLine.setOnClickListener(v -> editPendingSend());
         card.addView(transcriptLine, new LinearLayout.LayoutParams(-1, -2));
 
         toolLine = Ui.caption(c, "", Ui.AMBER);
         toolLine.setPadding(dp(c, 16), 0, dp(c, 16), dp(c, 4));
+        toolLine.setMaxLines(2); toolLine.setEllipsize(TextUtils.TruncateAt.END); // a tool's script or output must not fill the sheet
         toolLine.setVisibility(View.GONE);
         card.addView(toolLine, new LinearLayout.LayoutParams(-1, -2));
 
-        replyScroll = new ScrollView(c);
+        // The reply scrolls inside 40% of the space left by the system bars and keyboard, so the sheet never covers the display.
+        replyScroll = new ScrollView(c) {
+            @Override protected void onMeasure(int w, int h) {
+                int space = getResources().getDisplayMetrics().heightPixels;
+                android.view.WindowInsets in = getRootWindowInsets();
+                if (in != null) space -= android.os.Build.VERSION.SDK_INT >= 30
+                        ? in.getInsets(android.view.WindowInsets.Type.ime() | android.view.WindowInsets.Type.systemBars()).top
+                          + in.getInsets(android.view.WindowInsets.Type.ime() | android.view.WindowInsets.Type.systemBars()).bottom
+                        : in.getSystemWindowInsetTop() + in.getSystemWindowInsetBottom();
+                super.onMeasure(w, MeasureSpec.makeMeasureSpec(Math.max(dp(c, 96), space * 2 / 5), MeasureSpec.AT_MOST));
+            }
+        };
         replyText = Ui.body(c, "", Ui.TEXT);
         replyText.setTextSize(15);
         replyText.setLineSpacing(0, 1.18f);
@@ -526,7 +541,8 @@ public final class HermesVoiceSession extends VoiceInteractionSession implements
 
     /** User words fade in one at a time; words already shown keep full alpha as partial text grows. */
     private void setTranscript(String text) {
-        if (wordAnim != null) wordAnim.cancel();
+        // Partial results arrive faster than the fade: finish the running one, or its words stay faint for good.
+        if (wordAnim != null) { wordAnim.cancel(); for (FadeSpan f : transcriptWords) f.alpha = 1f; }
         if (text == null || text.isEmpty()) { transcriptLine.setText(""); transcriptLine.setVisibility(View.GONE); transcriptWords.clear(); transcriptShown = ""; return; }
         transcriptLine.setVisibility(View.VISIBLE);
         boolean grow = !transcriptShown.isEmpty() && text.startsWith(transcriptShown);
@@ -548,6 +564,10 @@ public final class HermesVoiceSession extends VoiceInteractionSession implements
         }
         transcriptShown = text;
         transcriptLine.setText(sp);
+        transcriptLine.post(() -> { // past four lines, show the newest words
+            android.text.Layout l = transcriptLine.getLayout();
+            if (l != null) transcriptLine.scrollTo(0, Math.max(0, l.getHeight() - (transcriptLine.getHeight() - transcriptLine.getTotalPaddingTop() - transcriptLine.getTotalPaddingBottom())));
+        });
         final int total = transcriptWords.size();
         if (!Ui.motionEnabled() || from >= total) return;
         final int first = from;
@@ -572,7 +592,8 @@ public final class HermesVoiceSession extends VoiceInteractionSession implements
         listening = false;
         if (!shown) { shown = true; WakeWordService.suspendForOverlay(); }
         String selectedProfile = store.profileId();
-        if (!selectedProfile.equals(apiProfile)) { apiProfile = selectedProfile; api = Backends.create(store, apiProfile); sessionId = null; }
+        String target = store.serverType() + " " + store.endpoint(); // switching Hermes/Codex or the address keeps the profile
+        if (!selectedProfile.equals(apiProfile) || !target.equals(apiTarget)) { apiProfile = selectedProfile; apiTarget = target; api = Backends.create(store, apiProfile); sessionId = null; }
         boolean fromWake = args != null && args.getBoolean(ARG_FROM_WAKE);
         final boolean call = store.callMode() || (args != null && args.getBoolean(ARG_CALL));
         final String opening = args == null ? null : args.getString(ARG_OPENING);
@@ -736,12 +757,21 @@ public final class HermesVoiceSession extends VoiceInteractionSession implements
 
     private boolean sessionResolving;
     private final List<Runnable> sessionWaiters = new ArrayList<>();
+    static boolean shouldIdleUnresolvedSession(int waiterToken, int currentToken, boolean shown, AssistantState.State state) {
+        return state == AssistantState.State.THINKING && (waiterToken == currentToken || !shown);
+    }
+
     private void resolveSession(Runnable then) {
         if (sessionId != null) { then.run(); return; }
         final int token = invocationToken;
         sessionWaiters.add(() -> {
-            if (token != invocationToken) return;
-            if (sessionId != null) then.run();
+            if (token != invocationToken || sessionId == null) {
+                // A stale resolve can drain a newer submit's waiter without a session.
+                // Discarding old work must not reset a newer visible invocation.
+                if (shouldIdleUnresolvedSession(token, invocationToken, shown, state)) idle(null);
+                return;
+            }
+            then.run();
         });
         if (sessionResolving) return;
         sessionResolving = true;
@@ -819,7 +849,7 @@ public final class HermesVoiceSession extends VoiceInteractionSession implements
         final LiveWhisper live = SpeechRecognition.live(getContext(), store, t -> main.post(() -> { if (token == invocationToken && shown && recorder == activeRecorder && listening) { heardWords[0] = true; setTranscript(t); } }), store.assistantMayEndTake() ? activeRecorder::stop : null);
         recorder.start(new VoiceRecorder.Listener() {
             public void onAudio(byte[] pcm, int length) { if (live != null) live.feed(pcm, length); }
-            public void onLevel(float level) { main.post(() -> { if (token == invocationToken && shown && recorder == activeRecorder) { micButton.level(smoothedLevel = AssistantState.smooth(smoothedLevel, level)); if (!heardWords[0]) { String r = SpeechRecognition.route(live, store.speechRecognition(), OnDeviceModel.installed(getContext())); if (!r.equals(transcriptShown)) setTranscript(r); } } }); }
+            public void onLevel(float level) { main.post(() -> { if (token == invocationToken && shown && recorder == activeRecorder) { micButton.level(smoothedLevel = AssistantState.smooth(smoothedLevel, level)); if (!heardWords[0]) { String r = SpeechRecognition.route(live, store.speechRecognition(), OnDeviceModel.installed(getContext())); if (!r.contentEquals(hintLine.getText())) { hintLine.setText(r); hintLine.setVisibility(View.VISIBLE); } } } }); }
             public void onError(String message) { main.post(() -> { if (token != invocationToken || !shown || recorder != activeRecorder) return; recorder = null; listening = false; micButton.setContentDescription("Listen"); showError("Microphone problem · " + message, () -> startListening(false)); }); }
             public void onDone(byte[] pcm, boolean heardSpeech) { main.post(() -> { if (token == invocationToken && shown && recorder == activeRecorder) { recorder = null; takeLive = heardSpeech ? live : null; if (!heardSpeech && live != null) live.abort(); handleTake(pcm, heardSpeech, false); } else if (live != null) live.abort(); }); }
         });
@@ -849,7 +879,7 @@ public final class HermesVoiceSession extends VoiceInteractionSession implements
         else if (SettingsStore.callActive && !fromWake) { startListening(true); }
         else if (followUp && !fromWake) idle("Tap the mic to keep talking");
         else showNotice("I didn't catch that. Try again, or type below.", () -> startListening(false));
-        if (!heardSpeech) return;
+        if (!heardSpeech) { takeInFlight = false; return; }
         final LiveWhisper live = fromWake ? null : takeLive;
         takeLive = null;
         new Thread(() -> {
@@ -857,6 +887,7 @@ public final class HermesVoiceSession extends VoiceInteractionSession implements
                 String raw = SpeechRecognition.finish(getContext(), store, live, pcm);
                 String text = fromWake ? WakeWordService.stripWake(raw) : raw.trim();
                 main.post(() -> {
+                    if (take == takeToken) takeInFlight = false;
                     if (token != invocationToken || take != takeToken || !shown) return;
                     if (WakeWordService.junkTranscript(text)) {
                         if (fromWake && !raw.trim().isEmpty() && text.isEmpty()) startListening(false);
@@ -868,7 +899,11 @@ public final class HermesVoiceSession extends VoiceInteractionSession implements
                     else showNotice("I couldn't make out any words. Try again a little closer to the mic.", () -> startListening(false));
                 });
             } catch (Exception e) {
-                main.post(() -> { if (token == invocationToken && take == takeToken && shown) showNotice("Speech recognition failed. Try again, or type below.", () -> startListening(false)); });
+                main.post(() -> {
+                    if (take == takeToken) takeInFlight = false;
+                    if (token == invocationToken && take == takeToken && shown)
+                        showNotice("Speech recognition failed. Try again, or type below.", () -> startListening(false));
+                });
             }
         }, "whisper").start();
     }
@@ -902,6 +937,7 @@ public final class HermesVoiceSession extends VoiceInteractionSession implements
         if (!shouldStopSpeakerForSubmit(text)) return;
         if (speaker != null && !automatic) speaker.stop();
         ++takeToken;
+        takeInFlight = false;
         if (recorder != null) { recorder.cancel(); recorder = null; }
         PhoneAgent agent = PhoneAgent.current();
         if (!automatic && agent != null && isAgentStopCommand(text)) {
@@ -1031,7 +1067,7 @@ public final class HermesVoiceSession extends VoiceInteractionSession implements
         } else { main.removeCallbacks(blink); replyText.setText(shown); }
         if (!(replyText.getMovementMethod() instanceof android.text.method.LinkMovementMethod)) replyText.setMovementMethod(android.text.method.LinkMovementMethod.getInstance());
         toolLine.setVisibility(TextUtils.isEmpty(run.lastToolLine) || run.approval != null ? View.GONE : View.VISIBLE);
-        toolLine.setText(run.lastToolLine);
+        toolLine.setText(run.lastToolLine.replaceAll("\\s+", " "));
         stopButton.setVisibility(run.active() ? View.VISIBLE : View.GONE);
         // Keep the orb on screen while Hermes works (its thinking animation is the feedback); just not tappable.
         micButton.setVisibility(getContext().checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED ? View.VISIBLE : View.GONE);

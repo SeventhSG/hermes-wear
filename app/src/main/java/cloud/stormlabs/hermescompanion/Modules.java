@@ -85,7 +85,7 @@ final class Modules {
             case HUB: return s.hubUrl().isEmpty() ? "Not connected" : "Connected · " + host(s.hubUrl());
             case STT: return "phone".equals(s.speechRecognition()) ? "Off · this phone recognizes speech" : "Server " + s.whisperAddress();
             case TTS: return !s.serverVoice() ? "Off · phone voice" : "Server " + (s.ttsAddress().isEmpty() ? ServerVoice.defaultFor(s.endpoint()) : s.ttsAddress());
-            case WAKE_WORD: return s.wakeEnabled() ? "Listening for “Hey Hermes”" : "Off";
+            case WAKE_WORD: return s.wakeEnabled() ? "Listening for “" + s.wakeLabel() + "”" : "Off";
             case PHONE: return HermesAccessibilityService.listed(c) ? "Screen control allowed" : "Screen control not allowed yet: tap to set up";
             case MEDIA: {
                 List<MediaModules.Module> m = MediaModules.cached(c);
@@ -280,8 +280,8 @@ final class Modules {
             JSONObject c = cur;
             a.runOnUiThread(() -> {
                 LinearLayout f = form(a);
-                EditText mac = field(a, f, "MAC address", c.optString("mac"), "D8:BB:C1:37:A8:89", false);
-                EditText host = field(a, f, "Machine IP or name", c.optString("host"), "192.168.0.150", false);
+                EditText mac = field(a, f, "MAC address", c.optString("mac"), "AA:BB:CC:DD:EE:01", false);
+                EditText host = field(a, f, "Machine IP or name", c.optString("host"), "192.168.1.150", false);
                 Sheets.form(a, "Wake the voice machine", f, "Save", () -> {
                     String m = mac.getText().toString().trim(), h = host.getText().toString().trim();
                     test(a, "Saving…", () -> { hub.wakeConfigSet(m, h); a.runOnUiThread(done); return m.isEmpty() ? "Cleared" : "Saved on the hub"; });

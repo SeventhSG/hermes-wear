@@ -99,6 +99,14 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
     private LinearLayout messages, liveBox, replyBar, commandPanel, attachBar, attachThumbs;
     private ScrollView scroller; private EditText composer; private ImageButton sendMic, accessChip, voiceKeyboard;
     private TextView voiceHint, effortChip, permsChip; private LinearLayout composerPill, agentStrip; private boolean typingMode;
+    private ContextRing contextRing;
+    private UsageState usageState = UsageState.parse(null);
+    private UsageSheet usageSheet;
+    private int usageRequest, usageEventVersion, agentSettingsRequest;
+    private JSONObject agentSettings = new JSONObject();
+    private TextView planChip, fastChip;
+    private boolean modeSaving, modeConfirming, usageResetting;
+    private static final java.util.Set<String> confirmedModes = new java.util.LinkedHashSet<>();
     private ChatViews.Sweep sweep;
     private final java.util.Set<Long> freshMessages = new java.util.HashSet<>();
     private RunManager.LiveRun animatedRun;
@@ -127,7 +135,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         runs = RunManager.get(this);
         sessionId = getIntent().getStringExtra(EXTRA_SESSION_ID);
         if (sessionId == null || sessionId.isEmpty()) { startActivity(new Intent(this, MainActivity.class).putExtra(MainActivity.EXTRA_OPEN_CHAT, true)); finish(); return; }
-        title = n(getIntent().getStringExtra(EXTRA_TITLE), "Hermes");
+        title = n(getIntent().getStringExtra(EXTRA_TITLE), store.serverType());
         model = HermesApi.clean(n(getIntent().getStringExtra(EXTRA_MODEL), ""));
         api = client();
         getWindow().setStatusBarColor(Ui.BAR); getWindow().setNavigationBarColor(Ui.BG);
@@ -136,7 +144,9 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         composer.setText(store.draft(sessionId));
         composer.setSelection(composer.length());
         loadMessages(true);
-        handleLaunchExtras(getIntent());
+        // A restored activity (process killed in the background, reopened from recents) gets its launch intent
+        // back with the prompt still in it; handling it again re-sent a message the user never typed.
+        if (b == null && (getIntent().getFlags() & Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) == 0) handleLaunchExtras(getIntent());
         refreshSessionMeta();
     }
 
@@ -146,7 +156,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         String target = intent.getStringExtra(EXTRA_SESSION_ID);
         if (target != null && !target.isEmpty() && !target.equals(sessionId)) {
             saveDraft();
-            openSession(target, n(intent.getStringExtra(EXTRA_TITLE), "Hermes"), HermesApi.clean(n(intent.getStringExtra(EXTRA_MODEL), "")));
+            openSession(target, n(intent.getStringExtra(EXTRA_TITLE), agentName()), HermesApi.clean(n(intent.getStringExtra(EXTRA_MODEL), "")));
         }
         handleLaunchExtras(intent);
     }
@@ -175,10 +185,10 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         Updater.check(this, false);
         updateAccess();
         refreshAgentStrip();
+        refreshUsage(false);
         KitWake.poke(store);
         screenControlReminder.setVisibility(store.shouldShowScreenControlReminder(HermesAccessibilityService.listed(this)) ? View.VISIBLE : View.GONE);
         WakeWordService.ensure(this);
-        askNotificationPermission();
         // Agent follow-ups and other devices add turns while we're away; onCreate already loaded once.
         if (resumedBefore && !busy() && loadedCount <= PAGE && isNearBottom()) loadMessages(false);
         if (resumedBefore) refreshSessionMeta(); // an agent task may have pinned another model
@@ -197,9 +207,17 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         AgentDisplay.warnIfStopped(this);
     }
 
+    private static long backupsAdoptedAt;
+
+    /** True when at least {@code everyMs} passed since {@code last} (also if the clock went backwards). */
+    static boolean due(long last, long now, long everyMs) { return now < last || now - last >= everyMs; }
+
     /** Addresses the hub lists (LAN, Tailscale, public URL) join the backup list, so the app keeps working on and off the LAN.
      *  Adds only, never removes; stops once the user edits the list by hand. */
     private void adoptBackupAddresses() {
+        long now = System.currentTimeMillis();
+        if (!due(backupsAdoptedAt, now, 60_000)) return;   // every screen unlock must not fan out hub calls
+        backupsAdoptedAt = now;
         if (features().hub) network.submit(() -> { try { MediaModules.refresh(getApplicationContext(), hub()); } catch (Exception ignored) {} });
         if (features().hub && DeviceCert.needsRenewal()) network.submit(() -> {
             try { DeviceCert.install(getApplicationContext(), hub().pairCert()); } catch (Exception ignored) {} // retried on the next chat open
@@ -225,6 +243,8 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
     @Override protected void onDestroy() {
         MarkdownView.Inline.stop();
         super.onDestroy();
+        ui.removeCallbacksAndMessages(null);   // delayed sends/title checks would hit the shut-down executor
+        if (usageSheet != null) usageSheet.dismiss();
         network.shutdownNow();
         if (speaker != null) speaker.shutdown();
         if (hold != null) hold.shutdown();
@@ -237,6 +257,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         Capabilities c = features();
         for (Sheets.Item item : items) {
             String title = item.title;
+            if (!"Hermes".equals(Backends.type(api)) && ChatLogic.hermesAction(title)) continue;
             if ((title.equals("Skills") || title.equals("Use a skill")) && !c.skills) continue;
             if ((title.equals("Schedule") || title.equals("Schedule this")) && !c.jobs) continue;
             if ((title.equals("Audit server")) && !c.hub) continue;
@@ -274,7 +295,6 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         runStrip.setOnClickListener(v -> confirmStop());
         column.addView(runStrip, match(34));
         FrameLayout chatLayer = new FrameLayout(this);
-        chatLayer.addView(new ChatCanvasView(), new FrameLayout.LayoutParams(-1, -1));
         scroller = new ScrollView(this); scroller.setFillViewport(true); scroller.setClipChildren(false);
         LinearLayout content = new LinearLayout(this); content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(dp(9), dp(12), dp(9), dp(12)); content.setClipChildren(false); content.setClipToPadding(false);
@@ -286,13 +306,13 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         chatLayer.addView(scroller, new FrameLayout.LayoutParams(-1, -1));
         chatLayer.addView(new ChatChrome.EdgeFade(this, true), new FrameLayout.LayoutParams(-1, dp(20), Gravity.TOP));
         chatLayer.addView(new ChatChrome.EdgeFade(this, false), new FrameLayout.LayoutParams(-1, dp(20), Gravity.BOTTOM));
-        jumpButton = Ui.num(this, "↓ " + ChatChrome.jumpLabel(0), 12, Ui.TEXT);
-        jumpButton.setGravity(Gravity.CENTER); jumpButton.setPadding(dp(16), 0, dp(16), 0); jumpButton.setMinHeight(dp(48));
+        jumpButton = Ui.text(this, "↓ " + ChatChrome.jumpLabel(0), 12, Ui.TEXT, false);
+        jumpButton.setGravity(Gravity.CENTER); jumpButton.setPadding(dp(12), 0, dp(12), 0); jumpButton.setMinHeight(dp(34));
         jumpButton.setBackground(Ui.round(this, Ui.tier(3), 99)); Ui.elevate(jumpButton, 2);
         jumpButton.setContentDescription("Jump to latest");
         jumpButton.setVisibility(View.GONE);
         jumpButton.setOnClickListener(v -> { scrollBottom(true); showJump(false); });
-        FrameLayout.LayoutParams jp = new FrameLayout.LayoutParams(-2, dp(48), Gravity.BOTTOM | Gravity.END); jp.setMargins(0, 0, dp(14), dp(14));
+        FrameLayout.LayoutParams jp = new FrameLayout.LayoutParams(-2, dp(34), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL); jp.setMargins(0, 0, 0, dp(10));
         chatLayer.addView(jumpButton, jp);
         scroller.setOnTouchListener((v, e) -> { int a = e.getActionMasked(); dragging = a == MotionEvent.ACTION_DOWN || a == MotionEvent.ACTION_MOVE; return false; });
         scroller.setOnScrollChangeListener((v, x, y, ox, oy) -> {
@@ -351,21 +371,18 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
             ImageButton back = Ui.icon(this, R.drawable.ic_back, "Back to dashboard"); back.setOnClickListener(v -> onBackPressed());
             bar.addView(back, new LinearLayout.LayoutParams(dp(52), dp(56)));
         } else bar.setPadding(dp(14), 0, dp(2), 0);
-        View mark = ChatViews.mark(this, 32, false); mark.setContentDescription("Conversation info"); mark.setOnClickListener(v -> showSessionInfo());
+        // The agent's mark switches harness (Hermes, Claude Code, Codex); the subtitle names it, so no extra pill crowds the title.
+        View mark = ChatViews.mark(this, 32, false, Backends.type(api)); mark.setContentDescription("Harness: " + store.serverType() + ". Tap to switch between Hermes, Claude Code and Codex"); mark.setOnClickListener(v -> Harness.picker(this));
+        mark.setBackground(Ui.ripple(this, Color.TRANSPARENT, 16));
         bar.addView(mark, new LinearLayout.LayoutParams(dp(32), dp(32)));
         LinearLayout names = new LinearLayout(this); names.setOrientation(LinearLayout.VERTICAL); names.setPadding(dp(12), 0, 0, 0); names.setGravity(Gravity.CENTER_VERTICAL);
         titleView = Ui.title(this, title, Ui.TEXT); titleView.setSingleLine(true); titleView.setEllipsize(TextUtils.TruncateAt.END);
-        subView = Ui.num(this, "", 12, Ui.FAINT); subView.setSingleLine(true); subView.setEllipsize(TextUtils.TruncateAt.END);
+        subView = Ui.text(this, "", 12, Ui.SUB, false); subView.setSingleLine(true); subView.setEllipsize(TextUtils.TruncateAt.END);
         showModel();
         if (features().models) subView.setOnClickListener(v -> showModelPicker());
         names.addView(titleView); names.addView(subView);
         names.setOnClickListener(v -> showSessionInfo());
         bar.addView(names, new LinearLayout.LayoutParams(0, -2, 1));
-        // One tap from inside any chat: before this, starting a fresh conversation
-        // needed the drawer (menu -> Tools row -> New) or a trip back to the Chats
-        // tab. Focus layout already has this via its command palette; this is the
-        // drawer layout's equivalent.
-        bar.addView(harnessChip(), new LinearLayout.LayoutParams(-2, dp(32)));
         ImageButton newChat = Ui.icon(this, R.drawable.ic_new, "New conversation");
         newChat.setOnClickListener(v -> newChatFromHeader());
         bar.addView(newChat, new LinearLayout.LayoutParams(dp(48), dp(56)));
@@ -376,10 +393,10 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
 
     /** "Hermes ▾" / "Codex ▾" / "Claude Code ▾" in the header: one tap to switch harness (see Harness). */
     private View harnessChip() {
-        TextView chip = Ui.text(this, store.serverType() + " \u25be", 12, Ui.SUB, false);
+        TextView chip = Ui.text(this, agentName() + " \u25be", 12, Ui.SUB, false);
         chip.setGravity(Gravity.CENTER_VERTICAL); chip.setSingleLine(true);
         chip.setPadding(dp(10), 0, dp(10), 0);
-        chip.setBackground(Ui.stroke(this, Ui.tier(1), Ui.LINE, 16));
+        chip.setBackground(Ui.ripple(this, Color.TRANSPARENT, 8));
         chip.setContentDescription("Harness: " + store.serverType() + ". Tap to switch between Hermes, Claude Code and Codex");
         chip.setOnClickListener(v -> Harness.picker(this));
         return chip;
@@ -407,21 +424,30 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
 
     /** Reasoning-effort and permission chips above the composer, for any server that lets you set them. */
     private View buildAgentStrip() {
-        agentStrip = new LinearLayout(this); agentStrip.setGravity(Gravity.CENTER_VERTICAL);
-        agentStrip.setPadding(dp(12), dp(2), dp(12), dp(0)); agentStrip.setBackgroundColor((Ui.BG & 0xffffff) | 0xe6000000);
+        agentStrip = new LinearLayout(this); agentStrip.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
+        agentStrip.setPadding(dp(8), dp(2), dp(8), 0);
         effortChip = agentChip("Reasoning effort", false); permsChip = agentChip("Agent permissions", true);
+        permsChip.setOnClickListener(v -> cycleAgentMode());
+        permsChip.setOnLongClickListener(v -> { showAgentSettings(true); return true; });
+        permsChip.setContentDescription("Agent mode, tap to cycle, hold for all modes");
+        planChip = agentChip("Plan mode", false); fastChip = agentChip("Fast mode", false);
+        planChip.setOnClickListener(v -> togglePlan()); fastChip.setOnClickListener(v -> toggleFast());
         agentStrip.addView(effortChip, chipParams()); agentStrip.addView(permsChip, chipParams());
+        agentStrip.addView(planChip, chipParams()); agentStrip.addView(fastChip, chipParams());
         agentStrip.setVisibility(View.GONE);
-        return agentStrip;
+        HorizontalScrollView scroll = new HorizontalScrollView(this); scroll.setHorizontalScrollBarEnabled(false);
+        // The backdrop spans the whole row (as the composer below does), not just the chips.
+        scroll.setBackgroundColor((Ui.BG & 0xffffff) | 0xe6000000); scroll.setClipToPadding(false);
+        scroll.addView(agentStrip, new FrameLayout.LayoutParams(-2, -2, Gravity.START)); return scroll;
     }
 
-    private LinearLayout.LayoutParams chipParams() { LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-2, dp(44)); p.setMarginEnd(dp(8)); return p; }
+    private LinearLayout.LayoutParams chipParams() { LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-2, dp(30)); p.setMarginEnd(dp(2)); return p; }
 
     private TextView agentChip(String description, boolean permissions) {
-        TextView chip = Ui.text(this, "", 13, Ui.SUB, false);
-        chip.setGravity(Gravity.CENTER_VERTICAL); chip.setSingleLine(true); chip.setMaxWidth(dp(190));
-        chip.setPadding(dp(12), 0, dp(12), 0); chip.setContentDescription(description + ", tap to change");
-        chip.setBackground(Ui.stroke(this, Ui.tier(1), Ui.LINE, 18));
+        TextView chip = Ui.text(this, "", 12, Ui.SUB, false);
+        chip.setGravity(Gravity.CENTER_VERTICAL | Gravity.START); chip.setSingleLine(true); chip.setMaxWidth(dp(200));
+        chip.setEllipsize(android.text.TextUtils.TruncateAt.END); chip.setPadding(dp(8), 0, dp(8), 0); chip.setContentDescription(description + ", tap to change");
+        chip.setBackground(Ui.ripple(this, Color.TRANSPARENT, 8)); // quiet text buttons, not outlined pills
         chip.setOnClickListener(v -> showAgentSettings(permissions));
         chip.setVisibility(View.GONE);
         return chip;
@@ -432,24 +458,37 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         if (agentStrip == null || !api.supportsAgentSettings()) return;
         final AgentBackend target = api;
         final String sid = sessionId, profile = apiProfile;
+        final int request = ++agentSettingsRequest;
         network.submit(() -> {
             String effort = null, perms = null;
+            JSONObject loaded = new JSONObject();
             try {
                 JSONObject settings = target.getSessionSettings(sid);
+                loaded = settings;
                 effort = chipLabel(settings, false); perms = chipLabel(settings, true);
             } catch (Exception ignored) { /* bridge too old or offline: no strip */ }
             final String e = effort, p = perms;
+            final JSONObject settings = loaded;
             runOnUiThread(() -> {
-                if (!sameAgentSettingsTarget(target, sid, profile)) return;
+                if (!sameAgentSettingsTarget(target, sid, profile) || request != agentSettingsRequest) return;
+                agentSettings = settings;
                 setChip(effortChip, e == null ? null : "Effort · " + e);
-                setChip(permsChip, p == null ? null : "Access · " + p);
-                agentStrip.setVisibility(e == null && p == null ? View.GONE : View.VISIBLE);
+                setChip(permsChip, p == null || !target.supportsCommands() ? p : "Mode · " + p);
+                permsChip.setTextColor(modeColor(settings.optString("permission_mode")));
+                Boolean plan = AgentSettings.planMode(settings);
+                setChip(planChip, plan == null ? null : "Plan" + (plan ? " · On" : " · Off"));
+                planChip.setTextColor(Boolean.TRUE.equals(plan) ? Ui.GREEN : Ui.SUB);
+                List<AgentSettings.Option> fast = AgentSettings.fastOptions(settings);
+                String fastLabel = "⚡ Fast";
+                for (AgentSettings.Option o : fast) if (o.selected) fastLabel = "⚡ " + o.label;
+                setChip(fastChip, fast.isEmpty() ? null : fastLabel);
+                agentStrip.setVisibility(e == null && p == null && plan == null && fast.isEmpty() ? View.GONE : View.VISIBLE);
             });
         });
     }
 
     private static String chipLabel(JSONObject settings, boolean permissions) {
-        for (AgentSettings.Option o : AgentSettings.options(settings, permissions)) if (o.selected) return o.label + " ▾";
+        for (AgentSettings.Option o : AgentSettings.options(settings, permissions)) if (o.selected) return o.label + (permissions ? "" : " ▾");
         return AgentSettings.options(settings, permissions).isEmpty() ? null : "Not set ▾";
     }
 
@@ -468,7 +507,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         ImageButton plus = Ui.icon(this, R.drawable.ic_new, "Attach, skills and quick actions"); plus.setOnClickListener(v -> showPlusSheet());
         pill.addView(plus, new LinearLayout.LayoutParams(dp(48), dp(48)));
         composer = new EditText(this);
-        composer.setTextColor(Ui.TEXT); composer.setHintTextColor(Ui.FAINT); composer.setHint("Message " + store.serverType());
+        composer.setTextColor(Ui.TEXT); composer.setHintTextColor(Ui.FAINT); composer.setHint("Message " + agentName());
         composer.setTextSize(focus() ? 18 : 16); composer.setBackgroundColor(Color.TRANSPARENT);
         composer.setPadding(dp(2), dp(focus() ? 16 : 12), dp(14), dp(focus() ? 16 : 12)); composer.setMinLines(focus() ? 2 : 1); composer.setMaxLines(focus() ? 10 : 6);
         composer.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE | android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
@@ -495,6 +534,8 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         accessChip.setOnClickListener(v -> Sheets.actionMode(this, store, this::updateAccess));
         accessChip.setVisibility(View.GONE);
         pill.addView(accessChip, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        contextRing = new ContextRing(this); contextRing.setOnClickListener(v -> showUsage());
+        pill.addView(contextRing, new LinearLayout.LayoutParams(dp(48), dp(48)));
         outer.addView(pill, new LinearLayout.LayoutParams(0, -2, 1));
         if (voiceLayout()) {
             voiceHint = Ui.text(this, "Hold the mic and speak", 15, Ui.SUB, false);
@@ -513,22 +554,30 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         }
         sendMic = Ui.icon(this, R.drawable.ic_mic, "Talk to " + store.serverType());
         sendMic.setTag(R.drawable.ic_mic);
-        sendMic.setImageTintList(ColorStateList.valueOf(Color.WHITE)); sendMic.setBackground(Ui.circle(Ui.BLUE));
+        micLook(Ui.TEXT);
         sendMic.setOnClickListener(v -> {
             Ui.tick(v);
             String text = composer.getText().toString().trim();
-            if (!text.isEmpty() || hasAttachments()) sendComposer();
+            if (busy()) stopRun();
+            else if (!text.isEmpty() || hasAttachments()) sendComposer();
             else if (talking) stopTalking();
             else if (voiceLayout() && typingMode && !busy()) { setTyping(false); startVoice(); }
-            else if (busy()) confirmStop();
             else startVoice();
         });
         sendMic.setOnTouchListener(this::micTouch);
         sendMic.setOnLongClickListener(v -> { if (busy()) { stopRun(); return true; } return false; });
-        int send = voiceLayout() ? 72 : focus() ? 56 : 48;
-        if (voiceLayout()) sendMic.setPadding(dp(20), dp(20), dp(20), dp(20));
-        LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(dp(send), dp(send)); sp.setMargins(dp(6), 0, 0, 0);
-        outer.addView(sendMic, sp);
+        int send = voiceLayout() ? 72 : focus() ? 44 : 40;
+        if (voiceLayout()) sendMic.setPadding(dp(20), dp(20), dp(20), dp(20)); else sendMic.setPadding(dp(9), dp(9), dp(9), dp(9));
+        LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(dp(send), dp(send));
+        if (voiceLayout()) sp.setMargins(dp(6), 0, 0, 0); else sp.setMargins(dp(2), 0, dp(4), dp(4));
+        steerSend = Ui.text(this, "Steer", 13, Ui.BLUE, true);
+        steerSend.setGravity(Gravity.CENTER);
+        steerSend.setBackground(Ui.ripple(this, Ui.SURFACE, 12));
+        steerSend.setContentDescription("Send a steer while the run continues");
+        steerSend.setVisibility(View.GONE);
+        steerSend.setOnClickListener(v -> sendComposer());
+        outer.addView(steerSend, new LinearLayout.LayoutParams(dp(52), dp(48)));
+        (voiceLayout() ? outer : pill).addView(sendMic, sp); // inside the field, like Claude and ChatGPT
         sweep = new ChatViews.Sweep(this);
         FrameLayout frame = new FrameLayout(this);
         frame.addView(outer, new FrameLayout.LayoutParams(-1, -2));
@@ -538,11 +587,19 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         return frame;
     }
 
+    /** Mic / send / stop button: a solid disc with a contrasting glyph (light disc, dark glyph at rest; red while recording). */
+    private void micLook(int fill) {
+        sendMic.setBackground(Ui.circle(fill));
+        sendMic.setImageTintList(ColorStateList.valueOf(fill == Ui.TEXT ? Ui.BG : Color.WHITE));
+    }
+
     /** The shield chip next to the composer: visible only while Full access is on. */
     private void updateAccess() {
         if (accessChip == null) return;
-        if ("Full access".equals(store.actionMode())) Ui.showFade(accessChip); else accessChip.setVisibility(View.GONE);
+        if ("Hermes".equals(Backends.type(api)) && "Full access".equals(store.actionMode())) Ui.showFade(accessChip); else accessChip.setVisibility(View.GONE);
     }
+
+    private String agentName() { return Brand.name(this, Backends.type(api)); }
 
     private boolean busy() { return runs.active(apiProfile, sessionId) != null; }
 
@@ -565,14 +622,26 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
     /** Guards the header's "New conversation" button: createSession() is a bare async call with
      *  no dedupe, so a few fast taps before the first one navigates away each created their own
      *  real, persisted session. */
-    private boolean creatingNewChat;
+    private boolean creatingNewChat, conversationError;
+    private String recoveredSessionId;
+    private TextView steerSend;
 
     private void newChatFromHeader() {
-        if (history.isEmpty() && !busy()) return; // already an empty/fresh chat: nothing to add
+        if (!ChatLogic.allowNewChat(history.isEmpty(), busy(), conversationError)) return;
         if (creatingNewChat) return;
         creatingNewChat = true;
         network.submit(() -> {
-            try { HermesApi.SessionInfo s = api.createSession("New conversation"); runOnUiThread(() -> { creatingNewChat = false; switchSession(s); }); }
+            try { HermesApi.SessionInfo s = api.createSession("New conversation"); runOnUiThread(() -> {
+                creatingNewChat = false;
+                String draft = conversationError ? composer.getText().toString() : null;
+                List<String> images = conversationError ? new ArrayList<>(pendingImages) : new ArrayList<>();
+                List<String[]> files = conversationError ? new ArrayList<>(pendingFiles) : new ArrayList<>();
+                switchSession(s);
+                if (draft != null) {
+                    composer.setText(draft); composer.setSelection(composer.length()); store.draft(sessionId, draft);
+                    pendingImages.addAll(images); pendingFiles.addAll(files); refreshAttachBar();
+                }
+            }); }
             catch (Exception e) { runOnUiThread(() -> { creatingNewChat = false; toast(HermesApi.friendly(e)); }); }
         });
     }
@@ -581,12 +650,13 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
 
     private void updateComposerState(String text) {
         boolean has = !text.trim().isEmpty() || hasAttachments();
-        if (has) Ui.swapIcon(sendMic,R.drawable.ic_send,busy() ? (features().steer ? "Steer the run" : "Wait for the current run") : "Send");
-        else if (busy()) Ui.swapIcon(sendMic,R.drawable.ic_stop,"Stop");
+        if (busy()) Ui.swapIcon(sendMic,R.drawable.ic_stop,"Stop");
+        else if (has) Ui.swapIcon(sendMic,R.drawable.ic_send,"Send");
         else if (talking) Ui.swapIcon(sendMic,R.drawable.ic_stop,"Stop talking");
         else Ui.swapIcon(sendMic,R.drawable.ic_mic,"Talk to " + store.serverType());
+        steerSend.setVisibility(busy() && has && features().steer ? View.VISIBLE : View.GONE);
         sweep.setActive(busy());
-        composer.setHint(busy() ? (features().steer ? "Steer Hermes while it works…" : "Wait for the current run…") : "Message " + store.serverType());
+        composer.setHint(busy() ? (features().steer ? "Steer " + agentName() + " while it works…" : "Wait for the current run…") : "Message " + agentName());
         renderCommandSuggestions(text);
     }
 
@@ -597,12 +667,12 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         String needle = q.substring(1).toLowerCase(Locale.ROOT);
         int count = 0;
         for (String[] c : COMMANDS) {
-            if (!c[0].startsWith(needle) || !features().allowsCommand(c[0])) continue;
+            if (!c[0].startsWith(needle) || !features().allowsCommand(c[0], api.supportsCommands())) continue;
             LinearLayout row = new LinearLayout(this); row.setGravity(Gravity.CENTER_VERTICAL);
             row.setPadding(dp(16), dp(6), dp(12), dp(6)); row.setBackground(Ui.ripple(this, Color.TRANSPARENT, 0));
             TextView cmd = Ui.text(this, "/" + c[0], 14, Ui.BLUE, true); cmd.setTypeface(Typeface.MONOSPACE);
             row.addView(cmd, new LinearLayout.LayoutParams(dp(104), dp(40)));
-            row.addView(Ui.text(this, c[1], 13, Ui.SUB, false), new LinearLayout.LayoutParams(0, -2, 1));
+            row.addView(Ui.text(this, c[1].replace("Hermes", agentName()), 13, Ui.SUB, false), new LinearLayout.LayoutParams(0, -2, 1));
             String name = c[0];
             row.setOnClickListener(v -> {
                 boolean args = name.equals("new") || name.equals("steer") || name.equals("fork") || name.equals("rename");
@@ -614,7 +684,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         }
         // Everything else the server knows (built-ins, skills, plugins), like Hermes Desktop's slash menu.
         java.util.Set<String> local = new java.util.HashSet<>();
-        for (String[] c : COMMANDS) if (features().allowsCommand(c[0])) local.add(c[0]);
+        for (String[] c : COMMANDS) if (features().allowsCommand(c[0], api.supportsCommands())) local.add(c[0]);
         for (String[] c : serverCommands) {
             if (count >= 8) break;
             if (!c[0].startsWith(needle) || local.contains(c[0])) continue;
@@ -690,10 +760,11 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
                         for (HermesApi.Message m : loaded) if (m.id != 0 && !old.contains(m.id)) freshMessages.add(m.id);
                     }
                     // Resume reloads: skip the full re-render when nothing changed (the common case).
-                    if (!showSpinner && sameMessages(history, loaded) && reports.equals(actionReports)) return;
+                    if (!showSpinner && !conversationError && sameMessages(history, loaded) && reports.equals(actionReports)) return;
+                    conversationError = false;
                     history.clear(); history.addAll(loaded);
                     actionReports = reports;
-                    loadedCount = loaded.size(); hasMore = loaded.size() >= PAGE;
+                    loadedCount = HermesApi.rawRows(loaded); hasMore = loadedCount >= PAGE;
                     renderMessages(true);
                 });
             } catch (Exception e) {
@@ -702,10 +773,14 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
                     messages.removeAllViews();
                     String error = HermesApi.friendly(e);
                     boolean missing = HermesApi.isSessionNotFound(error);
-                    if (missing) forgetMissingSession(sid);
+                    conversationError = true;
+                    if (missing) {
+                        forgetMissingSession(sid);
+                        if (!busy()) recoverMissingSession(sid, null);
+                    }
                     TextView err = systemBubble(missing ? "This conversation was deleted. Tap to start a new one."
                             : "Couldn't load this conversation. Tap to retry.\n" + error, Ui.RED);
-                    err.setOnClickListener(v -> { if (missing) createSession("New conversation"); else loadMessages(true); });
+                    err.setOnClickListener(v -> { if (missing) { recoveredSessionId = null; recoverMissingSession(sid, null); } else loadMessages(true); });
                 });
             }
         });
@@ -720,7 +795,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
                 java.util.Map<String, String> reports = loadActionReports(sid);
                 runOnUiThread(() -> {
                     if (!sid.equals(sessionId)) return;
-                    loadedCount += older.size(); hasMore = older.size() >= PAGE;
+                    int raw = HermesApi.rawRows(older); loadedCount += raw; hasMore = raw >= PAGE;
                     history.addAll(0, older);
                     actionReports = reports;
                     int before = messages.getHeight();
@@ -746,14 +821,20 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
             more.setOnClickListener(v -> loadEarlier(more));
         }
         String lastDay = "", lastRole = "", previousUser = "";
-        HermesApi.Message lastReply = null;
-        for (HermesApi.Message m : history) if ("assistant".equals(m.role) && !DeviceActions.stripForDisplay(m.content).trim().isEmpty()) lastReply = m;
+        // Copy / read aloud / share / reply sit under the last answer of each turn only, not every step.
+        java.util.Set<HermesApi.Message> turnEnds = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        HermesApi.Message lastAnswer = null;
+        for (HermesApi.Message m : history) {
+            if ("user".equals(m.role)) { if (lastAnswer != null) turnEnds.add(lastAnswer); lastAnswer = null; }
+            else if ("assistant".equals(m.role) && !m.content.isEmpty()) lastAnswer = m;
+        }
+        if (lastAnswer != null) turnEnds.add(lastAnswer);
         for (HermesApi.Message m : history) {
             String day = day(m.timestamp);
             if (!day.equals(lastDay)) { datePill(day); lastDay = day; }
             if ("tool".equals(m.role) && m.pairedToolResult) continue;
             if ("tool".equals(m.role)) { addTools(messages, m.toolCalls, true); continue; }
-            if ("system".equals(m.role)) continue;
+            if ("system".equals(m.role)) { messages.addView(ChatViews.systemNote(this, m.content), match(-2)); lastRole = "system"; continue; }
             if (!m.reasoning.isEmpty() && store.showReasoning() && features().reasoning && !"user".equals(m.role)) messages.addView(reasoningBlock(m.reasoning, false), toolParams());
             // Hermes' own continuation nudges ("[System: The previous response was cut off…]") are stored
             // as user turns; show a quiet note instead of a bubble the user never wrote.
@@ -770,7 +851,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
                 if (bubble != null) lastRole = m.role;
                 String report = "assistant".equals(m.role) ? reports.get(replyKey(sessionId, m.content)) : null;
                 if (report != null) messages.addView(actionChip(report), toolParams());
-                if (bubble != null && m == lastReply) messages.addView(replyActions(m, previousUser.startsWith("Rewrite this dictation")), match(-2));
+                if (bubble != null && turnEnds.contains(m)) messages.addView(replyActions(m, previousUser.startsWith("Rewrite this dictation")), match(-2));
             } else if (!m.toolCalls.isEmpty()) lastRole = "tool";
             if ("user".equals(m.role)) previousUser = m.content;
             addTools(messages, m.toolCalls, true);
@@ -800,11 +881,11 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
     private void renderEmptyState() {
         LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL); box.setGravity(Gravity.CENTER_HORIZONTAL);
         box.setPadding(dp(18), dp(48), dp(18), dp(12));
-        View mark = ChatViews.mark(this, 56, false);
+        View mark = ChatViews.mark(this, 56, false, Backends.type(api));
         box.addView(mark, new LinearLayout.LayoutParams(dp(56), dp(56)));
-        TextView h = Ui.title(this, ChatLogic.EMPTY_PROMPT, Ui.TEXT); h.setPadding(dp(8), dp(16), dp(8), dp(8)); h.setGravity(Gravity.CENTER);
+        TextView h = Ui.title(this, ChatLogic.emptyPrompt(Backends.type(api), !store.hubUrl().isEmpty()), Ui.TEXT); h.setPadding(dp(8), dp(16), dp(8), dp(8)); h.setGravity(Gravity.CENTER);
         box.addView(h);
-        for (String[] idea : ChatLogic.SUGGESTIONS) {
+        for (String[] idea : ChatLogic.suggestions(Backends.type(api), !store.hubUrl().isEmpty())) {
             TextView chip = Ui.body(this, idea[0], Ui.TEXT);
             chip.setGravity(Gravity.CENTER_VERTICAL); chip.setMinHeight(dp(48));
             chip.setPadding(dp(16), dp(8), dp(16), dp(8));
@@ -909,7 +990,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         int sections = body.split("\n## ").length;
         TextView b = Ui.num(this, body.replace("## ", ""), 12, Ui.CODE_TEXT); b.setLineSpacing(0, 1.12f); b.setTextIsSelectable(true);
         b.setPadding(dp(10), dp(8), dp(10), dp(8)); b.setBackground(Ui.round(this, Ui.CODE_BG, 10));
-        return foldCard("Phone → Hermes", sections + " result" + (sections == 1 ? "" : "s"), Ui.BLUE, b, false, tint(Ui.BLUE, 0x14), tint(Ui.BLUE, 0x44));
+        return foldCard("Phone → " + agentName(), sections + " result" + (sections == 1 ? "" : "s"), Ui.BLUE, b, false, tint(Ui.BLUE, 0x14), tint(Ui.BLUE, 0x44));
     }
 
     /** "Done on this phone" card listing each device action and whether it worked. */
@@ -952,12 +1033,13 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         if (mine) {
             wrap.setGravity(Gravity.END);
             bubble.setPadding(dp(14), dp(10), dp(14), dp(6));
-            bubble.setBackground(Ui.gradient(this, Ui.MINE_TOP, Ui.MINE_BOTTOM, Math.round(Ui.concept.cardRadius)));
-            Ui.press(bubble); ChatChrome.softShadow(bubble, Ui.BLUE, 3);
+            // Flat neutral bubble (as in Claude and ChatGPT): no accent gradient, no glow under it.
+            bubble.setBackground(Ui.round(this, Ui.tier(2), 20));
+            Ui.press(bubble);
             LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(-2, -2); bp.setMargins(dp(48), top, 0, dp(4));
             return bp;
         }
-        View mark = grouped ? new View(this) : ChatViews.mark(this, 20, replying);
+        View mark = grouped ? new View(this) : ChatViews.mark(this, 20, replying, Backends.type(api));
         if (grouped) mark.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         LinearLayout.LayoutParams mp = new LinearLayout.LayoutParams(dp(20), dp(20)); mp.setMargins(dp(4), top + dp(2), 0, 0);
         wrap.addView(mark, mp);
@@ -968,9 +1050,9 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
 
     private View addBubble(HermesApi.Message m, LinearLayout into) {
         boolean mine = "user".equals(m.role);
-        String content = mine ? DeviceContext.stripScreen(m.content) : DeviceActions.parse(m.content).cleanText;
+        String content = mine ? ChatLogic.stripOrigin(DeviceContext.stripScreen(m.content)) : DeviceActions.parse(m.content).cleanText;
         String steer = mine ? ChatLogic.steerBody(content) : null;
-        if (steer != null) content = ChatLogic.steerShown(steer);
+        if (steer != null) content = ChatLogic.steerShown(ChatLogic.stripOrigin(steer));
         String capture = mine ? ChatLogic.captureLabel(content) : null;
         String structured = mine ? null : ChatLogic.captureReply(m.content);
         if (structured != null) content = structured;
@@ -1000,10 +1082,10 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
             if (!mine) ChatChrome.rhythm(body);
             bubble.addView(body);
         }
-        // Time and ticks: quiet mono caption, hidden until the bubble is tapped (the last message shows it by default).
-        TextView time = Ui.num(this, time(m.timestamp) + (mine ? "  ✓✓" : ""), 12, mine ? Ui.MINE_META : Ui.FAINT);
+        // Assistant timestamps stay visible after reload; tap any message to toggle its time.
+        TextView time = Ui.num(this, time(m.timestamp) + (mine ? "  ✓✓" : ""), 12, Ui.FAINT);
         time.setGravity(mine ? Gravity.END : Gravity.START); time.setPadding(mine ? dp(24) : 0, dp(2), dp(2), 0);
-        time.setVisibility(View.GONE); lastTime = time;
+        time.setVisibility(mine ? View.GONE : View.VISIBLE); lastTime = time;
         bubble.addView(time);
         bubble.setOnClickListener(v -> { if (time.getVisibility() == View.VISIBLE) time.setVisibility(View.GONE); else { time.setVisibility(View.VISIBLE); Ui.fadeIn(time); } });
         bubble.setOnLongClickListener(lc);
@@ -1045,19 +1127,21 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
 
     private View toolCard(HermesApi.ToolCall t) {
         LinearLayout card = new LinearLayout(this); card.setGravity(Gravity.CENTER_VERTICAL);
-        card.setMinimumHeight(dp(56));
-        card.setPadding(dp(12), dp(8), dp(10), dp(8)); card.setBackground(Ui.press(this, Ui.tier(2), Ui.tier(2), 14)); Ui.press(card);
-        TextView icon = Ui.body(this, Tools.glyph(t.name), Color.WHITE); icon.setTypeface(Ui.WORD_SEMI); icon.setGravity(Gravity.CENTER);
-        icon.setBackground(Ui.round(this, Tools.color(t.name), 10));
+        // One quiet line per step (glyph, tool, command), like Claude's and ChatGPT's tool rows; tap for the full call.
+        card.setMinimumHeight(dp(40));
+        card.setPadding(dp(36), dp(2), dp(6), dp(2)); card.setBackground(Ui.ripple(this, Color.TRANSPARENT, 10)); Ui.press(card); // glyph lines up with the reply text
+        TextView icon = Ui.caption(this, Tools.glyph(t.name), Ui.SUB); icon.setTypeface(Ui.WORD_SEMI); icon.setGravity(Gravity.CENTER);
+        icon.setBackground(Ui.round(this, Ui.tier(2), 6));
         icon.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        card.addView(icon, new LinearLayout.LayoutParams(dp(36), dp(36)));
-        LinearLayout text = new LinearLayout(this); text.setOrientation(LinearLayout.VERTICAL); text.setPadding(dp(10), 0, dp(8), 0);
-        TextView name = Ui.body(this, Tools.label(t.name), Ui.TEXT); name.setTypeface(Ui.WORD_SEMI); text.addView(name);
+        card.addView(icon, new LinearLayout.LayoutParams(dp(26), dp(26)));
+        LinearLayout text = new LinearLayout(this); text.setGravity(Gravity.CENTER_VERTICAL); text.setPadding(dp(10), 0, dp(8), 0);
+        TextView name = Ui.caption(this, Tools.label(t.name), Ui.TEXT); name.setTypeface(Ui.WORD_SEMI); text.addView(name);
         String summary = Tools.summary(t);
         if ("{}".equals(summary) && !t.result.isEmpty()) summary = t.result;
         TextView sum = Ui.caption(this, summary, Ui.SUB);
         sum.setTypeface("terminal".equals(t.name) || Ui.concept.mono ? Typeface.MONOSPACE : Typeface.DEFAULT); sum.setSingleLine(true); sum.setEllipsize(TextUtils.TruncateAt.END);
-        text.addView(sum);
+        sum.setPadding(dp(8), 0, 0, 0);
+        text.addView(sum, new LinearLayout.LayoutParams(0, -2, 1));
         card.addView(text, new LinearLayout.LayoutParams(0, -2, 1));
         boolean failed = "failed".equals(t.status), running = "running".equals(t.status);
         String key = t.id + t.name; boolean finished = !running && runningTools.remove(key);
@@ -1085,11 +1169,11 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
             pill.setScaleX(.7f); pill.setScaleY(.7f);
             pill.animate().scaleX(1f).scaleY(1f).setDuration(260).setInterpolator(new android.view.animation.OvershootInterpolator(3f)).start();
         }
-        card.addView(pill, new LinearLayout.LayoutParams(-2, -2));
+        if (failed || running || finished) card.addView(pill, new LinearLayout.LayoutParams(-2, -2)); // a settled "Done" on every step is noise
         ImageView arrow = new ImageView(this); arrow.setImageResource(R.drawable.ic_chevron); arrow.setRotation(-90);
         arrow.setImageTintList(ColorStateList.valueOf(Ui.FAINT));
         arrow.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        LinearLayout.LayoutParams ap = new LinearLayout.LayoutParams(dp(20), dp(20)); ap.setMarginStart(dp(6));
+        LinearLayout.LayoutParams ap = new LinearLayout.LayoutParams(dp(16), dp(16)); ap.setMarginStart(dp(4));
         card.addView(arrow, ap);
         card.setOnClickListener(v -> openTool(t));
         card.setContentDescription(Tools.label(t.name) + ", " + (failed ? "failed" : running ? "running" : "done") + ". " + summary);
@@ -1154,13 +1238,18 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
 
     @Override public void onRunUpdate(RunManager.LiveRun run, String kind) {
         if (!apiProfile.equals(run.profileId)) return;
-        if (!run.sessionId.equals(sessionId)) { if (RunManager.UPDATE_FINISHED.equals(kind) || RunManager.UPDATE_ERROR.equals(kind)) toast("Hermes finished in " + run.sessionTitle); return; }
+        if (!run.sessionId.equals(sessionId)) { if (RunManager.UPDATE_FINISHED.equals(kind) || RunManager.UPDATE_ERROR.equals(kind)) toast(agentName() + " finished in " + run.sessionTitle); return; }
         switch (kind) {
+            case "usage":
+                usageEventVersion++;
+                if (run.usage != null) applyUsage(UsageState.merge(usageState, run.usage.json));
+                return;
             case RunManager.UPDATE_APPROVAL:
                 getWindow().getDecorView().performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
                 renderLive(run);
                 break;
             case RunManager.UPDATE_FINISHED: case RunManager.UPDATE_ERROR:
+                refreshUsage(false); refreshAgentStrip();
                 finishRun(run);
                 break;
             default:
@@ -1173,8 +1262,9 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
     private void attachLiveRun() {
         RunManager.LiveRun run = runs.run(apiProfile, sessionId);
         if (run == null) { liveBox.removeAllViews(); updateRunStrip(null); return; }
+        if (run.usage != null) applyUsage(UsageState.merge(usageState, run.usage.json));
         if (run.active()) { renderLive(run); updateRunStrip(run); }
-        else if (!run.actionsHandled || (run.voice && !run.spoken)) finishRun(run);
+        else if (run.needsFinish()) finishRun(run);
         updateComposerState(composer.getText().toString());
     }
 
@@ -1243,7 +1333,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
             if (!toolRun.isEmpty()) { addTools(liveBox, toolRun, false); toolRun = new ArrayList<>(); }
             if (o instanceof RunManager.LiveRun.Note) {
                 RunManager.LiveRun.Note n = (RunManager.LiveRun.Note) o;
-                if (n.steer) addBubble(new HermesApi.Message(0, "user", ChatLogic.steerShown(n.text), null, System.currentTimeMillis() / 1000.0), liveBox);
+                if (n.steer) addBubble(new HermesApi.Message(0, "user", ChatLogic.steerShown(n.text, run.queuedSteers.contains(n.text)), null, System.currentTimeMillis() / 1000.0), liveBox);
                 else { TextView t = Ui.body(this, n.text.trim(), Ui.SUB); t.setPadding(dp(14), dp(4), dp(14), dp(4)); liveBox.addView(t, match(-2)); }
                 continue;
             }
@@ -1251,6 +1341,12 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
             String segText = DeviceActions.stripForDisplay((String) seg[1]).trim();
             if (segText.isEmpty()) continue;
             liveBox.addView(liveBubble(seg[0], segText, i == lastText && textLast), match(-2));
+            if (i != lastText || !textLast) {
+                HermesApi.Message reply = new HermesApi.Message(0, "assistant", segText, null, run.startedAt / 1000.0);
+                TextView time = Ui.num(this, time(reply.timestamp), 12, Ui.FAINT);
+                time.setPadding(dp(26), 0, 0, 0); liveBox.addView(time, match(-2));
+                liveBox.addView(replyActions(reply, false), match(-2));
+            }
         }
         if (!toolRun.isEmpty()) addTools(liveBox, toolRun, false);
         if (run.approval != null && run.approval.clarify) liveBox.addView(questionCard(run), toolParams());
@@ -1323,7 +1419,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         LinearLayout card = new LinearLayout(this); card.setOrientation(LinearLayout.VERTICAL);
         card.setPadding(dp(16), dp(14), dp(16), dp(12)); card.setBackground(Ui.stroke(this, Ui.tier(2), Ui.AMBER, 14)); Ui.elevate(card, 2);
         card.addView(Ui.label(this, "Waiting on you", Ui.AMBER));
-        TextView head = Ui.title(this, "Hermes needs your approval", Ui.TEXT); head.setPadding(0, dp(4), 0, 0);
+        TextView head = Ui.title(this, agentName() + " needs your approval", Ui.TEXT); head.setPadding(0, dp(4), 0, 0);
         card.addView(head);
         if (!a.description.isEmpty()) { TextView d = Ui.body(this, a.description, Ui.SUB); d.setPadding(0, dp(6), 0, 0); card.addView(d); }
         if (!a.command.isEmpty()) {
@@ -1339,7 +1435,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
             String label = HermesApi.Approval.label(choice);
             TextView b = "deny".equals(choice) ? Ui.ghostButton(this, label, Ui.RED) : "once".equals(choice) ? Ui.primaryButton(this, label) : Ui.secondaryButton(this, label);
             b.setOnClickListener(v -> {
-                if ("always".equals(choice)) Sheets.confirm(this, "Always allow?", "Hermes will run commands matching this pattern without asking again.", "Always allow", true, () -> answer(run, choice));
+                if ("always".equals(choice)) Sheets.confirm(this, "Always allow?", agentName() + " will run commands matching this pattern without asking again.", "Always allow", true, () -> answer(run, choice));
                 else answer(run, choice);
             });
             boolean ghost = "deny".equals(choice);
@@ -1356,8 +1452,8 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         HermesApi.Approval q = run.approval;
         LinearLayout card = new LinearLayout(this); card.setOrientation(LinearLayout.VERTICAL);
         card.setPadding(dp(16), dp(14), dp(16), dp(12)); card.setBackground(Ui.stroke(this, Ui.tier(2), Ui.BLUE, 14)); Ui.elevate(card, 2);
-        card.addView(Ui.label(this, "Hermes asks", Ui.BLUE));
-        TextView head = Ui.title(this, q.description.isEmpty() ? "Hermes has a question" : q.description, Ui.TEXT); head.setPadding(0, dp(4), 0, 0); head.setTextIsSelectable(true);
+        card.addView(Ui.label(this, agentName() + " asks", Ui.BLUE));
+        TextView head = Ui.title(this, q.description.isEmpty() ? agentName() + " has a question" : q.description, Ui.TEXT); head.setPadding(0, dp(4), 0, 0); head.setTextIsSelectable(true);
         card.addView(head);
         java.util.Set<String> picked = new java.util.LinkedHashSet<>();
         TextView send = Ui.primaryButton(this, "Send");
@@ -1393,29 +1489,30 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
     }
 
     private void updateRunStrip(RunManager.LiveRun run) {
-        boolean working = run != null && run.active();
-        if (working) { subView.setText(run.approval != null ? (run.approval.clarify ? "waiting for your answer" : "waiting for approval") : "working…"); subView.setContentDescription(null); } else showModel();
-        subView.setTextColor(working ? Ui.AMBER : Ui.FAINT);
-        if (!working) { runStrip.setVisibility(View.GONE); return; }
-        Ui.showFade(runStrip);
-        if (run.approval != null) { runStrip.setText(run.approval.clarify ? "?  Hermes is asking you something" : "⚠  Waiting for your approval"); runStrip.setTextColor(Ui.AMBER); return; }
-        runStrip.setText("●  " + (run.lastToolLine.isEmpty() ? "Hermes is working" : run.lastToolLine) + " · tap to stop");
-        runStrip.setTextColor(Ui.AMBER);
+        showModel();
+        // The thread shows progress and approvals; Stop stays beside the composer.
+        runStrip.setVisibility(View.GONE);
     }
 
     private void finishRun(RunManager.LiveRun run) {
         liveBox.removeAllViews();
         if (run.error == null) checkTitle(run.sessionId, 0);
         updateRunStrip(null);
-        if (run.error != null && !"Cancelled".equals(run.error)) {
+        if (run.error != null && !RunManager.isCancelled(run.error)) {
+            run.errorShown();   // shown once: attachLiveRun re-runs finishRun on every resume until this is set
             boolean missing = HermesApi.isSessionNotFound(run.error);
-            if (missing) forgetMissingSession(run.sessionId);
+            conversationError = true;
+            if (missing) {
+                forgetMissingSession(run.sessionId);
+                if (!run.sessionId.equals(recoveredSessionId)) { recoverMissingSession(run.sessionId, run); return; }
+                loadIntoComposer(ChatLogic.recoveryDraft(run.userText, composer.getText().toString()));
+            }
             TextView err = systemBubble(missing ? "This conversation no longer exists on the server. Tap to send in a new one."
-                    : ChatLogic.runFailure(run.error), Ui.RED);
+                    : ChatLogic.runFailure(agentName(), run.error), Ui.RED);
             final String retry = run.userText;
             err.setOnClickListener(v -> {
+                if (missing) { recoveredSessionId = null; recoverMissingSession(run.sessionId, run); return; }
                 runs.forget(run.profileId, run.sessionId);
-                if (missing) { createSession("New conversation", retry); return; }
                 ViewGroup p = (ViewGroup) err.getParent(); if (p != null) p.removeView(err);
                 if (retry != null) sendText(retry, false, false, run.payload, run.systemMessage);
             });
@@ -1443,6 +1540,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
     // ── sending ─────────────────────────────────────────────────────────────────────────────────
 
     private void sendComposer() {
+        if (creatingNewChat) { toast("Opening a new chat. Your draft is kept."); return; }
         String text = composer.getText().toString().trim();
         if (text.isEmpty() && !hasAttachments()) return;
         clearComposer();
@@ -1507,7 +1605,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
                     agentRound++;
                     ui.postDelayed(() -> sendText(followUp, run.voice, true), 400);
                 } else {
-                    systemBubble("Hermes wanted more phone data — paused after " + agentRound + " steps. Reply to let it continue.", Ui.AMBER);
+                    systemBubble(agentName() + " wanted more phone data — paused after " + agentRound + " steps. Reply to let it continue.", Ui.AMBER);
                 }
             }
             return;
@@ -1585,15 +1683,16 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
     }
 
     private void sendText(String text, boolean voice, boolean automatic, String newTitle, Object retryPayload, String retrySystemMessage) {
-        if (!features().images && !pendingImages.isEmpty()) { toast("This server does not support images; remove the image before sending"); return; }
+        if (creatingNewChat) { restoreUnsent(text, voice, automatic, retryPayload); return; }
+        if (!features().images && !pendingImages.isEmpty()) { toast("This server does not support images; remove the image before sending"); restoreUnsent(text, voice, automatic, retryPayload); return; }
         if (!automatic) agentRound = 0;
         RunManager.LiveRun live = runs.active(apiProfile, sessionId);
         if (live != null) {
-            if (!features().steer && (live.approval == null || !live.approval.clarify)) { toast("Wait for the current run to finish"); return; }
+            if (!features().steer && (live.approval == null || !live.approval.clarify)) { toast("Wait for the current run to finish"); restoreUnsent(text, voice, automatic, retryPayload); return; }
             // The steer rides into the live run, so show it there as its own bubble; the reloaded
             // transcript carries the same row once Hermes delivers it.
             runs.steer(live, text, r -> {
-                if (!r.ok) { toast(r.text); return; }
+                if (!r.ok) { toast(r.text); restoreUnsent(text, voice, automatic, retryPayload); return; }
                 if (live.sessionId.equals(sessionId) && live.active()) { renderLive(live); scrollBottom(); }
             });
             return;
@@ -1615,7 +1714,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         if (retryPayload == null && !pendingImages.isEmpty()) SentImages.save(this, sessionId, pendingImages);
         if (retryPayload == null) clearAttachments();
         RunManager.LiveRun run = runs.start(api, apiProfile, sessionId, title, payload, retryPayload == null ? DeviceContext.systemMessage(this, store, voice) : retrySystemMessage, shown, false);
-        if (run == null) { toast("Hermes is already working here"); return; }
+        if (run == null) { toast(agentName() + " is already working here"); restoreUnsent(text, voice, automatic, retryPayload); return; }
         if (newTitle != null) {
             final String sid = sessionId;
             network.submit(() -> {
@@ -1633,6 +1732,15 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         scrollBottom();
     }
 
+    /** A typed message that was not sent goes back into the (cleared) composer; voice, automatic and retry sends were never typed. */
+    static boolean shouldRestoreUnsent(String text, boolean voice, boolean automatic, Object retryPayload, CharSequence composerNow) {
+        return text != null && !text.isEmpty() && !voice && !automatic && retryPayload == null && (composerNow == null || composerNow.toString().trim().isEmpty());
+    }
+
+    private void restoreUnsent(String text, boolean voice, boolean automatic, Object retryPayload) {
+        if (shouldRestoreUnsent(text, voice, automatic, retryPayload, composer.getText())) loadIntoComposer(text);
+    }
+
     static Object payload(String text, List<String> images) {
         if (images == null || images.isEmpty()) return text;
         try {
@@ -1643,11 +1751,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         } catch (Exception e) { return text; }
     }
 
-    private void confirmStop() {
-        RunManager.LiveRun run = runs.active(apiProfile, sessionId);
-        if (run == null) return;
-        Sheets.confirm(this, "Stop Hermes?", "The current run will be interrupted. Anything already done stays done.", "Stop", true, this::stopRun);
-    }
+    private void confirmStop() { stopRun(); }
 
     private void stopRun() {
         RunManager.LiveRun run = runs.active(apiProfile, sessionId);
@@ -1656,16 +1760,12 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         runs.stop(run);
     }
 
-    private void askNotificationPermission() {
-        if (Build.VERSION.SDK_INT < 33 || store.notificationPermissionAsked()) return;
-        store.markNotificationPermissionAsked();
-        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
-            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, NOTIFY_REQ);
-    }
-
     private void executeCommand(CompanionCommand c) {
+        if (ChatLogic.serverStatus(Backends.type(api), features().hub, c.name)) {
+            runServerCommand("/status" + (c.args.isEmpty() ? "" : " " + c.args)); return;
+        }
         if ("help".equals(c.name) && api.supportsCommands()) { showCommandOutput("/help", commandHelp()); return; }
-        if (!features().allowsCommand(c.name)) {
+        if (!features().allowsCommand(c.name, api.supportsCommands())) {
             // Not an app command here: the harness may still run it itself (Codex /undo, Claude Code /compact …).
             boolean theirs = false;
             for (String[] s : serverCommands) if (s[0].equals(c.name)) theirs = true;
@@ -1699,6 +1799,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
             case "profile": Profiles.show(this); break;
             case "assistant": openAssistantSettings(); break;
             case "undo": {
+                if (api.supportsCommands()) { runBridgeCommand("/undo" + (c.args.isEmpty() ? "" : " " + c.args)); break; }
                 int n = 1; try { if (!c.args.isEmpty()) n = Math.max(1, Integer.parseInt(c.args.trim())); } catch (NumberFormatException ignored) {}
                 undoTurns(n); break;
             }
@@ -1716,8 +1817,8 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
     private String commandHelp() {
         StringBuilder b = new StringBuilder();
         java.util.Set<String> seen = new java.util.HashSet<>();
-        for (String[] c : COMMANDS) if (features().allowsCommand(c[0]) && seen.add(c[0])) b.append('/').append(c[0]).append("  ").append(c[1]).append('\n');
-        for (String[] c : serverCommands) if (seen.add(c[0])) b.append('/').append(c[0]).append("  ").append(c[1]).append('\n');
+        for (String[] c : COMMANDS) if (features().allowsCommand(c[0], api.supportsCommands()) && seen.add(c[0])) b.append('/').append(c[0]).append("  ").append(c[1].replace("Hermes", agentName())).append('\n');
+        for (String[] c : serverCommands) if (seen.add(c[0])) b.append('/').append(c[0]).append("  ").append(c[1].replace("Hermes", agentName())).append('\n');
         return b.toString().trim();
     }
 
@@ -1735,6 +1836,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
                     if ("send".equals(type) && !message.isEmpty()) { sendText(message, false); return; }
                     if ("undo".equals(type)) { loadMessages(false); if (!r.optString("text").isEmpty()) loadIntoComposer(r.optString("text")); toast(r.optString("notice", "Undone")); return; }
                     if (!output.isEmpty()) showCommandOutput(command, output); else systemBubble(r.optString("notice", "Done"), Ui.SUB);
+                    refreshUsage(false);
                     refreshSessionMeta(); // a /review or /compact turn the daemon started: follow it live
                 });
             } catch (Exception e) {
@@ -1760,6 +1862,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
                     String text = output.isEmpty() ? r.optString("notice", "Done") : output;
                     if (!r.optString("warning").isEmpty()) text += "\n\n" + r.optString("warning");
                     showCommandOutput(command, text);
+                    refreshUsage(false);
                     loadMessages(false); // /title, /compress and friends change the chat
                     refreshSessionMeta();
                 });
@@ -1771,6 +1874,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
 
     /** Short results inline; long ones (/help, /usage, tables) in a scrollable monospace sheet. */
     private void showCommandOutput(String command, String text) {
+        if (isFinishing() || isDestroyed()) return;   // the slow command answered after Back: Dialog.show() would throw
         String t = text.replaceAll("\\u001B\\[[;\\d]*m", "").trim();
         if (t.length() < 280 && t.split("\n").length <= 4) { systemBubble(t, Ui.SUB); return; }
         Dialog d = new Dialog(this); d.requestWindowFeature(Window.FEATURE_NO_TITLE); d.setCanceledOnTouchOutside(true);
@@ -1842,7 +1946,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
                 org.json.JSONArray rows = r.optJSONArray("checkpoints");
                 runOnUiThread(() -> {
                     if (!r.optBoolean("enabled", false)) { systemBubble("Checkpoints are off for this profile (checkpoints.enabled in config.yaml).", Ui.SUB); return; }
-                    if (rows == null || rows.length() == 0) { systemBubble("No filesystem checkpoints yet. Hermes takes one before it edits files.", Ui.SUB); return; }
+                    if (rows == null || rows.length() == 0) { systemBubble("No filesystem checkpoints yet. The agent takes one before it edits files.", Ui.SUB); return; }
                     List<Sheets.Choice> choices = new ArrayList<>();
                     for (int i = 0; i < rows.length(); i++) {
                         org.json.JSONObject c = rows.optJSONObject(i); if (c == null) continue;
@@ -1888,10 +1992,10 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         hero.setPadding(dp(18), dp(22), dp(8), dp(14)); hero.setBackground(Ui.gradient(this, Ui.tier(2), Ui.tier(1), 0));
         // Profile switcher: avatar + name + server host, health chip, and a chevron that opens the profile sheet.
         LinearLayout identityRow = new LinearLayout(this); identityRow.setGravity(Gravity.CENTER_VERTICAL);
-        String profile = store.profileName();
+        String profile = "Hermes".equals(Backends.type(api)) ? store.profileName() : agentName();
         // The Hermes mark in the profile's accent ring: swipe it sideways (it follows the finger) or tap to step
         // through profiles, long-press for the profile sheet.
-        drawerLogo = Ui.hermesLogo(this, 52);
+        drawerLogo = ChatViews.mark(this, 44, false, Backends.type(api));
         drawerLogo.setBackground(SwitchOverlay.ring(SwitchOverlay.accent(store.profileId()), dp(2)));
         drawerLogo.setContentDescription("Switch profile, current " + profile + ". Swipe or tap for the next profile, long-press for all");
         drawerLogo.setOnClickListener(v -> switchProfileRelative(1));
@@ -1914,7 +2018,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
             }
             return false;
         });
-        identityRow.addView(drawerLogo, new LinearLayout.LayoutParams(dp(52), dp(52)));
+        identityRow.addView(drawerLogo, new LinearLayout.LayoutParams(dp(44), dp(44)));
         LinearLayout identity = new LinearLayout(this); identity.setOrientation(LinearLayout.VERTICAL); identity.setPadding(dp(14), 0, dp(8), 0);
         TextView name = Ui.title(this, profile, Ui.TEXT); name.setSingleLine(true); name.setEllipsize(TextUtils.TruncateAt.END);
         identity.addView(name);
@@ -2010,6 +2114,11 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
     private void openSession(String id, String newTitle, String newModel) {
         runs.setVisibleSession(apiProfile, id);
         sessionId = id; title = newTitle; model = n(newModel, "");
+        conversationError = false;
+        usageRequest++; usageEventVersion++; agentSettingsRequest++; modeSaving = false; modeConfirming = false; usageResetting = false;
+        agentSettings = new JSONObject();
+        if (usageSheet != null) usageSheet.dismiss();
+        applyUsage(UsageState.parse(null));
         store.sessionId(id);
         store.sessionTitle(id, title);
         titleView.setText(title); showModel();
@@ -2020,6 +2129,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         attachLiveRun();
         refreshSessionMeta();
         refreshAgentStrip();
+        refreshUsage(false);
     }
 
     /** Codex sessions are driven from the terminal too: notice a turn started there while this chat is open. */
@@ -2036,10 +2146,17 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         network.submit(() -> {
             try {
                 HermesApi.SessionInfo s = api.getSession(sid);
+                String resolved = "";
+                if (s.model.isEmpty() && defaultModel.isEmpty() && features().models) {
+                    try { for (HermesApi.ModelOption option : api.modelOptions()) if (option.current) { resolved = option.id; break; } }
+                    catch (Exception ignored) {}
+                }
+                final String actualDefault = resolved;
                 if (s.unread) api.markUnread(sid, false);
                 runOnUiThread(() -> {
                     if (!sid.equals(sessionId)) return;
                     pinned = s.pinned;
+                    if (!actualDefault.isEmpty()) { defaultModel = actualDefault; showModel(); }
                     // A run working on the server that this phone didn't start (a Codex turn from the terminal): follow it live.
                     RunManager.LiveRun attached = s.activeRunId.isEmpty() ? null : runs.attach(api, apiProfile, sid, title, s.activeRunId, s.activeRunInput);
                     if (attached != null) { renderLive(attached); updateRunStrip(attached); updateComposerState(composer.getText().toString()); }
@@ -2089,6 +2206,46 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
             catch (Exception e) { runOnUiThread(() -> toast(HermesApi.friendly(e))); }
         });
     }
+    /** Recover once automatically; a broken server must not create sessions in a loop. */
+    private void recoverMissingSession(String sid, RunManager.LiveRun failed) {
+        if (creatingNewChat || !sid.equals(sessionId) || sid.equals(recoveredSessionId)) return;
+        creatingNewChat = true;
+        if (failed != null) {
+            String kept = ChatLogic.recoveryDraft(failed.userText, composer.getText().toString());
+            composer.setText(kept); composer.setSelection(composer.length());
+            store.draft(sid, kept);
+        }
+        final AgentBackend recoveryApi = api;
+        network.submit(() -> {
+            try {
+                HermesApi.SessionInfo fresh = recoveryApi.createSession("New conversation");
+                runOnUiThread(() -> {
+                    creatingNewChat = false;
+                    if (!sid.equals(sessionId) || isFinishing() || isDestroyed()) return;
+                    String draft = composer.getText().toString();
+                    if (failed != null && failed.payload != null) draft = ChatLogic.draftAfterRecovery(failed.userText, draft);
+                    List<String> images = new ArrayList<>(pendingImages);
+                    List<String[]> files = new ArrayList<>(pendingFiles);
+                    runs.forget(apiProfile, sid);
+                    recoveredSessionId = fresh.id;
+                    switchSession(fresh);
+                    if (failed != null && failed.payload != null) sendText(failed.userText, failed.voice, false, failed.payload, failed.systemMessage);
+                    pendingImages.addAll(images); pendingFiles.addAll(files); refreshAttachBar();
+                    composer.setText(draft); composer.setSelection(composer.length());
+                    store.draft(sessionId, draft);
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    creatingNewChat = false;
+                    if (!sid.equals(sessionId)) return;
+                    if (failed != null) loadIntoComposer(ChatLogic.recoveryDraft(failed.userText, composer.getText().toString()));
+                    TextView err = systemBubble("Couldn't open a new chat. Your message is kept. Tap to retry.\n" + HermesApi.friendly(e), Ui.RED);
+                    err.setOnClickListener(v -> recoverMissingSession(sid, failed));
+                });
+            }
+        });
+    }
+
     private void forgetMissingSession(String id) {
         if (id.equals(store.sessionId())) store.sessionId("");
         if (id.equals(store.assistantSessionId())) store.assistantSessionId("");
@@ -2136,7 +2293,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
     private void showMessageActions(HermesApi.Message m) {
         boolean mine = "user".equals(m.role);
         String plain = mine ? m.content : Markdown.plain(m.content);
-        Sheets.actions(this, mine ? "Your message" : "Hermes", "Choose an action",
+        Sheets.actions(this, mine ? "Your message" : agentName(), "Choose an action",
                 Sheets.Item.of(R.drawable.ic_reply, Ui.BLUE, "Reply", "Quote this message", () -> beginReply(m)),
                 Sheets.Item.of(R.drawable.ic_copy, Ui.BLUE_DARK, "Copy", "Copy the whole message", () -> copy(mine ? m.content : DeviceActions.parse(m.content).cleanText)),
                 Sheets.Item.of(R.drawable.ic_aspect, Ui.BLUE_DARK, "Select text", "Pick out part of it", () -> selectText(plain)),
@@ -2216,7 +2373,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
     }
 
     private void showAttachSheet() {
-        Sheets.actions(this, "Attach", "Photos go to Hermes as images; text files are sent inline", visibleItems(
+        Sheets.actions(this, "Attach", "Photos go to " + agentName() + " as images; text files are sent inline", visibleItems(
                 Sheets.Item.of(R.drawable.ic_attach, Ui.BLUE, "Take photo", "Use the camera", this::takePhoto),
                 Sheets.Item.of(R.drawable.ic_attach, Ui.BLUE_DARK, "Choose photos", "Up to " + MAX_IMAGES + " from the gallery", this::pickPhoto),
                 Sheets.Item.of(R.drawable.ic_share, Ui.BLUE_DARK, "Choose file", "Text, code, logs, CSV, JSON…", this::pickFile),
@@ -2422,6 +2579,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
 
     private void showMore() {
         Sheets.Item[] all = visibleItems(
+                Sheets.Item.of(R.drawable.ic_pulse, Ui.BLUE_DARK, "System", "Server health and services", () -> startActivity(new Intent(this, StatusActivity.class))),
                 Sheets.Item.of(R.drawable.ic_edit, Ui.BLUE_DARK, "Rename", null, () -> prompt("Rename conversation", title, this::rename)),
                 Sheets.Item.of(R.drawable.ic_pin, Ui.BLUE_DARK, pinned ? "Unpin" : "Pin", null, this::togglePin),
                 Sheets.Item.of(R.drawable.ic_assistant, Ui.BLUE_DARK, "Model", "Which model answers in this chat", this::showModelPicker),
@@ -2433,6 +2591,8 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
                 Sheets.Item.of(R.drawable.ic_archive, Ui.BLUE_DARK, "Archive", "Hide it, keep the transcript", this::archiveCurrent),
                 Sheets.Item.danger(R.drawable.ic_delete, "Delete", "Remove the conversation and its transcript", this::deleteSession));
         List<Sheets.Item> tiles = new ArrayList<>(), rows = new ArrayList<>(), danger = new ArrayList<>();
+        if (usageState.context != null || usageState.session != null || !usageState.limits.isEmpty() || usageState.resets != null)
+            rows.add(Sheets.Item.of(R.drawable.ic_pulse, Ui.BLUE_DARK, "Usage", "Context, tokens and plan limits", this::showUsage));
         for (Sheets.Item item : all) (ChatLogic.overflowGroup(item.title) == 0 ? tiles : ChatLogic.overflowGroup(item.title) == 1 ? rows : danger).add(item);
         rows.addAll(danger); // Delete goes last; Sheets.grid draws a divider above a destructive row. deleteSession still asks first.
         Sheets.grid(this, title, tiles.toArray(new Sheets.Item[0]), rows.toArray(new Sheets.Item[0]));
@@ -2463,7 +2623,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
                 Sheets.Item.of(R.drawable.ic_settings, Ui.BLUE_DARK, "Settings", "Companion settings", () -> startActivity(new Intent(this, SettingsActivity.class))),
                 Sheets.Item.of(R.drawable.ic_terminal, Ui.BLUE_DARK, "Terminal", "Shells and ssh on your server", () -> startActivity(new Intent(this, TerminalActivity.class))),
                 Sheets.Item.of(R.drawable.ic_session, Ui.BLUE_DARK, "Switch harness", store.serverType() + " \u00b7 Hermes, Claude Code or Codex", () -> Harness.picker(this)),
-                Sheets.Item.of(R.drawable.ic_assistant, Ui.BLUE_DARK, "Model", n(model, "Default model"), this::showModelPicker),
+                Sheets.Item.of(R.drawable.ic_assistant, Ui.BLUE_DARK, "Model", ChatLogic.shortModel(model.isEmpty() ? defaultModel : model), this::showModelPicker),
                 Sheets.Item.of(R.drawable.ic_bolt, Ui.BLUE_DARK, "Reasoning effort", "How hard it thinks, from the next message", () -> showAgentSettings(false)),
                 Sheets.Item.of(R.drawable.ic_shield, Ui.BLUE_DARK, "Agent permissions", "Commands and files on the agent host", () -> showAgentSettings(true)),
                 Sheets.Item.of(R.drawable.ic_archive, Ui.BLUE_DARK, "Archive", "Hide it, keep the transcript", this::archiveCurrent))));
@@ -2531,10 +2691,142 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         Sheets.info(this, title, "Current " + store.serverType() + " conversation", new String[][]{{"Conversation", sessionId}, {"Model", n(model, "Default provider model")}, {"Messages loaded", String.valueOf(history.size())}, {"Server", store.endpoint()}});
     }
 
+    private String defaultModel = "";
+
     /** Short model name under the title; the full id is the accessible name. */
     private void showModel() {
-        subView.setText(ChatLogic.shortModel(model) + (features().models ? " ▾" : ""));
-        subView.setContentDescription("Model " + n(model, "default") + (features().models ? ", tap to change" : ""));
+        subView.setText(agentName() + " · " + ChatLogic.shortModel(model.isEmpty() ? defaultModel : model) + (features().models ? " ▾" : ""));
+        subView.setContentDescription("Model " + n(model.isEmpty() ? defaultModel : model, "default") + (features().models ? ", tap to change" : ""));
+    }
+
+    private void applyUsage(UsageState next) {
+        usageState = next;
+        if (contextRing != null) contextRing.setUsage(next);
+        if (usageSheet != null && usageSheet.showing()) usageSheet.update(next);
+    }
+
+    private void refreshUsage(boolean refresh) {
+        final AgentBackend target = api;
+        final String sid = sessionId, profile = apiProfile;
+        final int request = ++usageRequest, eventVersion = usageEventVersion;
+        network.submit(() -> {
+            try {
+                UsageState next = UsageState.parse(target.usage(sid, refresh));
+                runOnUiThread(() -> {
+                    if (sameAgentSettingsTarget(target, sid, profile) && request == usageRequest && eventVersion == usageEventVersion) applyUsage(next);
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    if (!sameAgentSettingsTarget(target, sid, profile) || request != usageRequest) return;
+                    String message = String.valueOf(e.getMessage());
+                    if (message.startsWith("HTTP 404") || message.startsWith("HTTP 501") || e instanceof UnsupportedOperationException) applyUsage(UsageState.parse(null));
+                    if (refresh) toast("Could not refresh usage: " + HermesApi.friendly(e));
+                });
+            }
+        });
+    }
+
+    private void showUsage() {
+        if (usageSheet != null && usageSheet.showing()) return;
+        final AgentBackend target = api;
+        final String sid = sessionId, profile = apiProfile;
+        usageSheet = new UsageSheet(this, usageState, () -> refreshUsage(true),
+                () -> { if (sameAgentSettingsTarget(target, sid, profile)) runServerCommand(api.supportsCommands() ? "/compact" : "/compress"); },
+                (target.supportsCommands() || features().hub) ? () -> {
+                    if (!sameAgentSettingsTarget(target, sid, profile)) return;
+                    if (!target.supportsCommands()) { runServerCommand("/usage reset"); return; }
+                    if (usageResetting) return;
+                    usageResetting = true;
+                    network.submit(() -> {
+                        HermesApi.Result result = target.resetUsage(sid);
+                        runOnUiThread(() -> { if (sameAgentSettingsTarget(target, sid, profile)) { usageResetting = false; toast(result.text); if (result.ok) refreshUsage(true); } });
+                    });
+                } : null);
+        refreshUsage(false);
+    }
+
+    private int modeColor(String value) {
+        return AgentSettings.needsConfirm(value) ? Ui.RED : "plan".equals(value) || "smart".equals(value) ? Ui.GREEN
+                : "acceptEdits".equals(value) || "workspace-write".equals(value) ? Ui.BLUE : Ui.SUB;
+    }
+
+    private void cycleAgentMode() {
+        if (modeSaving) return;
+        AgentSettings.Option next = AgentSettings.next(agentSettings);
+        if (next == null) { showAgentSettings(true); return; }
+        permsChip.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+        saveAgentField("permission_mode", next.value, next.label, next.needsConfirm);
+    }
+
+    private void togglePlan() {
+        Boolean current = AgentSettings.planMode(agentSettings);
+        if (current != null) saveAgentField("plan_mode", !current, current ? "Plan off" : "Plan on", false);
+    }
+
+    private void toggleFast() {
+        List<AgentSettings.Option> options = AgentSettings.fastOptions(agentSettings);
+        if (options.size() < 2) return;
+        int current = -1;
+        for (int i = 0; i < options.size(); i++) if (options.get(i).selected) current = i;
+        AgentSettings.Option next = options.get(current < 0 ? 1 : (current + 1) % options.size());
+        saveAgentField("fast_mode", next.value, next.label, false);
+    }
+
+    private void showModeSheet(JSONObject settings) {
+        final AgentBackend target = api; final String sid = sessionId, profile = apiProfile;
+        List<Sheets.Item> items = new ArrayList<>();
+        for (AgentSettings.Option option : AgentSettings.options(settings, true)) {
+            items.add(Sheets.Item.of(R.drawable.ic_shield, modeColor(option.value), option.label, option.description,
+                    () -> { if (sameAgentSettingsTarget(target, sid, profile) && !option.selected && !"custom".equals(option.value)) saveAgentField("permission_mode", option.value, option.label, option.needsConfirm); }).checked(option.selected));
+        }
+        Boolean plan = AgentSettings.planMode(settings);
+        if (plan != null) items.add(Sheets.Item.of(R.drawable.ic_edit, Ui.GREEN, "Plan · " + (plan ? "On" : "Off"), "Think through the work before making changes", () -> { if (sameAgentSettingsTarget(target, sid, profile)) togglePlan(); }).checked(plan));
+        for (AgentSettings.Option option : AgentSettings.fastOptions(settings)) {
+            items.add(Sheets.Item.of(R.drawable.ic_bolt, Ui.BLUE, option.label, option.description,
+                    () -> { if (sameAgentSettingsTarget(target, sid, profile) && !option.selected) saveAgentField("fast_mode", option.value, option.label, false); }).checked(option.selected));
+        }
+        if (items.isEmpty()) { toast(settings.optString("permission_note", "No modes available from this server")); return; }
+        Sheets.actions(this, "Agent mode", settings.optString("permission_scope", settings.optString("scope", "Changes apply from your next message unless the server supports live changes.")), items.toArray(new Sheets.Item[0]));
+    }
+
+    private void saveAgentField(String field, Object value, String label, boolean dangerous) {
+        if (modeSaving || modeConfirming) return;
+        final AgentBackend target = api;
+        final String sid = sessionId, profile = apiProfile;
+        final String confirmationKey = profile + "\n" + sid + "\n" + value;
+        Runnable save = () -> {
+            if (modeSaving || !sameAgentSettingsTarget(target, sid, profile)) return;
+            modeSaving = true;
+            agentSettingsRequest++;
+            network.submit(() -> {
+                HermesApi.Result result;
+                try { result = target.setSessionSettings(sid, new JSONObject().put(field, value)); }
+                catch (Exception e) { result = HermesApi.Result.error(HermesApi.friendly(e)); }
+                final HermesApi.Result saved = result;
+                runOnUiThread(() -> {
+                    if (!sameAgentSettingsTarget(target, sid, profile)) return;
+                    modeSaving = false;
+                    if (saved.ok) {
+                        try { agentSettings.put(field, value); } catch (Exception ignored) { }
+                        if ("permission_mode".equals(field)) { setChip(permsChip, api.supportsCommands() ? "Mode · " + label : label); permsChip.setTextColor(modeColor(String.valueOf(value))); }
+                        if ("plan_mode".equals(field)) { setChip(planChip, "Plan · " + (Boolean.TRUE.equals(value) ? "On" : "Off")); planChip.setTextColor(Boolean.TRUE.equals(value) ? Ui.GREEN : Ui.SUB); }
+                        if ("fast_mode".equals(field)) setChip(fastChip, "⚡ " + label);
+                        if (dangerous) {
+                            if (confirmedModes.size() >= 128) confirmedModes.remove(confirmedModes.iterator().next());
+                            confirmedModes.add(confirmationKey);
+                        }
+                        Toast note = Toast.makeText(this, label, Toast.LENGTH_SHORT); note.show(); ui.postDelayed(note::cancel, 1500);
+                        refreshAgentStrip();
+                    } else toast(saved.text);
+                });
+            });
+        };
+        if (dangerous && !confirmedModes.contains(confirmationKey)) {
+            String scope = "yolo_chat".equals(value) ? "Applies only to this gateway conversation." : agentSettings.optString("permission_scope", "Applies to this agent conversation.");
+            modeConfirming = true;
+            Sheets.confirm(this, "Enable " + label + "?", "Allows commands and file changes without approval. " + scope, "Enable " + label, true,
+                    () -> { modeConfirming = false; save.run(); }, () -> modeConfirming = false);
+        } else save.run();
     }
 
     private boolean sameAgentSettingsTarget(AgentBackend target, String sid, String profile) {
@@ -2550,6 +2842,10 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         network.submit(() -> {
             try {
                 JSONObject settings = target.getSessionSettings(sid);
+                if (permissions) {
+                    runOnUiThread(() -> { if (sameAgentSettingsTarget(target, sid, profile)) { agentSettings = settings; showModeSheet(settings); } });
+                    return;
+                }
                 List<AgentSettings.Option> options = AgentSettings.options(settings, permissions);
                 List<Sheets.Choice> choices = new ArrayList<>();
                 for (AgentSettings.Option option : options) choices.add(new Sheets.Choice(option.label, option.description, option.selected));
@@ -2587,23 +2883,31 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
 
     private void showModelPicker() {
         if (!features().models) { toast("Model selection is unavailable for this server"); return; }
-        final String sid = sessionId;
+        final String sid = sessionId, profile = apiProfile;
+        final AgentBackend target = api;
         toast("Loading models…");
         network.submit(() -> {
             try {
-                final List<HermesApi.ModelOption> options = api.modelOptions();
+                final List<HermesApi.ModelOption> options = target.modelOptions();
                 final List<Sheets.Choice> choices = new ArrayList<>();
-                for (HermesApi.ModelOption o : options) choices.add(new Sheets.Choice(o.id, o.current ? o.provider + " · gateway default" : o.provider, o.id.equals(model)));
+                final java.util.Map<Sheets.Choice, HermesApi.ModelOption> models = new java.util.HashMap<>();
+                for (HermesApi.ModelOption o : options) {
+                    Sheets.Choice choice = new Sheets.Choice(ChatLogic.shortModel(o.id),
+                            (o.description.isEmpty() ? o.provider : o.description) + (o.current ? " · server default" : ""),
+                            model.isEmpty() ? o.current : o.id.equals(model));
+                    choices.add(choice); models.put(choice, o);
+                }
                 java.util.Collections.sort(choices, (x, y) -> (y.selected ? 1 : 0) - (x.selected ? 1 : 0));
                 runOnUiThread(() -> {
-                    if (choices.isEmpty()) { toast("The gateway reported no usable models"); return; }
-                    Sheets.picker(this, "Model", "Now: " + (model.isEmpty() ? "default provider model" : model) + " · " + choices.size() + " available", choices, choice -> {
-                        HermesApi.ModelOption pick = null;
-                        for (HermesApi.ModelOption o : options) if (o.id.equals(choice.title) && (choice.subtitle == null || choice.subtitle.startsWith(o.provider))) { pick = o; break; }
-                        final String provider = pick == null ? "" : pick.provider;
+                    if (!sameAgentSettingsTarget(target, sid, profile)) return;
+                    if (choices.isEmpty()) { toast("The server reported no usable models"); return; }
+                    if (model.isEmpty()) for (HermesApi.ModelOption option : options) if (option.current) { defaultModel = option.id; showModel(); break; }
+                    Sheets.picker(this, "Model", "Now: " + ChatLogic.shortModel(model.isEmpty() ? defaultModel : model), choices, choice -> {
+                        HermesApi.ModelOption pick = models.get(choice);
+                        if (pick == null || !sameAgentSettingsTarget(target, sid, profile)) return;
                         network.submit(() -> {
-                            HermesApi.Result r = api.setSessionModel(sid, provider, choice.title);
-                            runOnUiThread(() -> { toast(r.text); if (r.ok && sid.equals(sessionId)) { model = choice.title; showModel(); } });
+                            HermesApi.Result r = target.setSessionModel(sid, pick.provider, pick.id);
+                            runOnUiThread(() -> { toast(r.text); if (r.ok && sameAgentSettingsTarget(target, sid, profile)) { model = pick.id; showModel(); } });
                         });
                     });
                 });
@@ -2643,7 +2947,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
             stopTalking();
             holdOn = true; holdCancelling = false;
             Ui.tick(sendMic);
-            sendMic.setBackground(Ui.circle(Ui.RED));
+            micLook(Ui.RED);
             sendMic.animate().scaleX(voiceLayout() ? 1.1f : 1.3f).scaleY(voiceLayout() ? 1.1f : 1.3f).setDuration(Ui.motionEnabled() ? 120 : 0).start();
             composer.setHint("Listening… let go to " + ("review".equals(store.voiceSend()) ? "add it to the box" : "send") + ", slide up to cancel");
             if (voiceHint != null) voiceHint.setText("Listening… let go to send · slide up to cancel");
@@ -2673,7 +2977,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
                     boolean away = holdDownY - e.getRawY() > dp(90);
                     if (away != holdCancelling) {
                         holdCancelling = away;
-                        sendMic.setBackground(Ui.circle(away ? Ui.FAINT : Ui.RED));
+                        micLook(away ? Ui.FAINT : Ui.RED);
                         composer.setHint(away ? "Let go to cancel" : "Listening… let go to " + ("review".equals(store.voiceSend()) ? "add it to the box" : "send") + ", slide up to cancel");
                     }
                 }
@@ -2686,7 +2990,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
                 if (!holdOn) { if (wasArmed && e.getActionMasked() == MotionEvent.ACTION_UP) { v.performClick(); } return true; } // a plain tap
                 if (e.getActionMasked() == MotionEvent.ACTION_CANCEL || holdCancelling || hold == null) { if (hold != null) hold.cancel(); holdReset(); return true; }
                 if (hold.heldMs() < 350) { hold.cancel(); holdReset(); toast("Hold the button while you speak"); return true; }
-                sendMic.setBackground(Ui.circle(Ui.BLUE));
+                micLook(Ui.TEXT);
                 sendMic.animate().scaleX(1f).scaleY(1f).setDuration(Ui.motionEnabled() ? 120 : 0).start();
                 sendMic.setAlpha(1f);
                 hold.release();
@@ -2699,7 +3003,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
     private void holdReset() {
         holdOn = false; holdArmed = false; holdCancelling = false;
         sendMic.removeCallbacks(holdStart);
-        sendMic.setBackground(Ui.circle(Ui.BLUE));
+        micLook(Ui.TEXT);
         sendMic.animate().scaleX(1f).scaleY(1f).setDuration(Ui.motionEnabled() ? 120 : 0).start();
         sendMic.setAlpha(1f);
         if (voiceHint != null) voiceHint.setText("Hold the mic and speak");
@@ -2799,15 +3103,15 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         return null;
     }
     void answerProposal(String id, boolean approved) {
-        if (busy()) { toast("Wait for Hermes to finish, then answer"); renderMessages(false); return; }
+        if (busy()) { toast("Wait for " + agentName() + " to finish, then answer"); renderMessages(false); return; }
         // Bare text via the retry path: no reply quote or attachments, so proposalAnswer() matches it later.
         String text = (approved ? "Approved #" : "Rejected #") + id;
         sendText(text, false, false, payload(text, new ArrayList<>()), DeviceContext.systemMessage(this, store, false));
     }
 
     private void systemNote(String content) {
-        String text = content.contains("network error") ? "Reply was interrupted · Hermes continued"
-                : content.contains("length limit") ? "Reply hit the length limit · Hermes continued" : "Hermes continued";
+        String text = content.contains("network error") ? "Reply was interrupted · " + agentName() + " continued"
+                : content.contains("length limit") ? "Reply hit the length limit · " + agentName() + " continued" : agentName() + " continued";
         TextView v = Ui.caption(this, text, Ui.FAINT);
         v.setGravity(Gravity.CENTER); v.setPadding(dp(12), dp(4), dp(12), dp(4));
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, -2); p.setMargins(0, dp(4), 0, dp(4));
@@ -2852,7 +3156,7 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
         });
     }
     private void toast(String s) { Toast.makeText(this, s == null ? "Done" : s, Toast.LENGTH_SHORT).show(); }
-    private void copy(String s) { ((ClipboardManager) getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("Hermes", s)); toast("Copied"); }
+    private void copy(String s) { ((ClipboardManager) getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText(agentName(), s)); toast("Copied"); }
     private static String n(String s, String f) { return s == null || s.isEmpty() ? f : s; }
     private static String time(double ts) { return new SimpleDateFormat("HH:mm", Locale.getDefault()).format(ts <= 0 ? new Date() : new Date((long) (ts * 1000))); }
     static String day(double ts) {
@@ -2875,27 +3179,17 @@ public final class ChatActivity extends Activity implements RunManager.Observer 
     }
     static String host(String endpoint) { try { return new java.net.URL(endpoint).getHost(); } catch (Exception e) { return endpoint; } }
 
-    private final class ChatCanvasView extends View {
-        private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        ChatCanvasView() { super(ChatActivity.this); p.setStrokeWidth(dp(1)); }
-        @Override protected void onDraw(Canvas c) {
-            p.setColor(0x0d94a1b3); // transparent base: the root's ambient glow shows through the pattern
-            for (int y = dp(28); y < getHeight(); y += dp(62))
-                for (int x = ((y / dp(62)) % 2) * dp(32); x < getWidth(); x += dp(64)) { c.drawCircle(x, y, dp(1), p); c.drawLine(x, y, x + dp(18), y + dp(18), p); }
-        }
-    }
-
     private void shareTranscript() {
         StringBuilder sb = new StringBuilder();
-        sb.append(title == null ? "Hermes" : title).append(" · Hermes conversation\n\n");
+        sb.append(title == null ? agentName() : title).append(" · ").append(agentName()).append(" conversation\n\n");
         for (HermesApi.Message m : history) {
             if ("tool".equals(m.role)) continue;
             for (HermesApi.ToolCall t : m.toolCalls) sb.append("• ").append(Tools.label(t.name)).append(": ").append(t.summary()).append('\n');
             String body = "user".equals(m.role) ? m.content.trim() : DeviceActions.parse(m.content).cleanText.trim();
             if (body.isEmpty()) continue;
-            sb.append("user".equals(m.role) ? "You: " : "Hermes: ").append(body).append("\n\n");
+            sb.append("user".equals(m.role) ? "You: " : agentName() + ": ").append(body).append("\n\n");
         }
-        Intent i = new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_SUBJECT, title + " · Hermes transcript").putExtra(Intent.EXTRA_TEXT, sb.toString().trim());
+        Intent i = new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_SUBJECT, title + " · " + agentName() + " transcript").putExtra(Intent.EXTRA_TEXT, sb.toString().trim());
         try { startActivity(Intent.createChooser(i, "Export conversation")); } catch (Exception e) { toast("Nothing to share yet"); }
     }
 

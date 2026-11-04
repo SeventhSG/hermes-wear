@@ -19,14 +19,11 @@ public class OnboardingTest {
         assertFalse(Onboarding.isLast(0));
     }
 
-    @Test public void permissionStateMapping() {
-        assertEquals(Onboarding.GRANTED, Onboarding.permState(true, true));
-        assertEquals(Onboarding.ASK, Onboarding.permState(false, false));
-        assertEquals(Onboarding.BLOCKED, Onboarding.permState(false, true));
-        assertEquals("Granted ✓", Onboarding.actionLabel(Onboarding.GRANTED));
-        assertEquals("Allow", Onboarding.actionLabel(Onboarding.ASK));
-        assertEquals("App info", Onboarding.actionLabel(Onboarding.BLOCKED));
-        assertEquals("Done", Onboarding.primaryLabel(true));
+    @Test public void setupHasThreePagesAndOnePrimaryAction() {
+        assertEquals(3, Onboarding.PAGES);
+        assertEquals("Connect to my server", Onboarding.primaryLabel(false, false));
+        assertEquals("Set up my server", Onboarding.primaryLabel(true, false));
+        assertEquals("Start chatting", Onboarding.primaryLabel(true, true));
     }
 
     @Test public void relayUrlIsNormalised() {

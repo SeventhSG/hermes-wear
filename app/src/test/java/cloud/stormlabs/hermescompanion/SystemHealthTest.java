@@ -36,7 +36,7 @@ public class SystemHealthTest {
         List<SystemHealth.Reason> r = SystemHealth.reasons(null, "Connection refused", ops(96), null, 0);
         assertEquals(SystemHealth.DOWN, SystemHealth.overall(r));
         assertEquals("Down", SystemHealth.label(SystemHealth.overall(r)));
-        assertEquals("Hermes unreachable: Connection refused", r.get(0).text);
+        assertEquals("Agent unreachable: Connection refused", r.get(0).text);
         assertEquals("Disk 96% full on homeserver", r.get(1).text);
         assertEquals("host", r.get(1).section);
     }

@@ -18,6 +18,9 @@ public class ToolPreviewTest {
     @Test public void harnessOnlyCommandsNeedTheirOwnBackend() {
         Capabilities codex = CodexBridgeApi.CODEX;
         assertFalse(codex.allowsCommand("undo"));
+        assertTrue(codex.allowsCommand("undo", true));
+        assertTrue(new ClaudeBridgeApi("http://localhost", "key", "session").capabilitiesForUi().allowsCommand("undo", true));
+        assertFalse(codex.allowsCommand("retry", true));
         assertFalse(codex.allowsCommand("home"));
         assertTrue(codex.allowsCommand("new"));
         assertTrue(Capabilities.HERMES.allowsCommand("undo"));

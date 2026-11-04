@@ -18,6 +18,9 @@ public final class Backends {
         return backend;
     }
 
+    /** The harness a client talks to, as {@link SettingsStore#serverType()} names it. */
+    static String type(AgentBackend b) { return b instanceof CodexBridgeApi ? "Codex" : b instanceof ClaudeBridgeApi ? "Claude Code" : "Hermes"; }
+
     static AgentBackend create(String type, String endpoint, String key, String sessionId) {
         switch (type) {
             case "Hermes": return new HermesApi(endpoint, key, sessionId);

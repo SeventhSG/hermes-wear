@@ -24,7 +24,7 @@ public final class MainActivity extends Activity {
     public static final String EXTRA_SESSION="open_session";
     /** Set by a profile switch: show the switch overlay in place of the splash and hand it on to the chat. */
     public static final String EXTRA_SWITCHING="switching";
-    public static final String EXTRA_PROFILE="open_profile", EXTRA_PROFILE_SECRET="open_profile_secret";
+    public static final String EXTRA_PROFILE="open_profile", EXTRA_PROFILE_SECRET="open_profile_secret", EXTRA_HARNESS="open_harness";
     /** Launcher shortcut actions (declared in res/xml/shortcuts.xml). */
     public static final String ACTION_VOICE="cloud.stormlabs.hermescompanion.VOICE";
     public static final String ACTION_NEW_CHAT="cloud.stormlabs.hermescompanion.NEW_CHAT";
@@ -34,8 +34,15 @@ public final class MainActivity extends Activity {
     private boolean switchProfileForIntent(){
         Intent in=getIntent();String id=in.getStringExtra(EXTRA_PROFILE);String secret=in.getStringExtra(EXTRA_PROFILE_SECRET);
         in.removeExtra(EXTRA_PROFILE);
-        if(id==null||!store.intentSecret().equals(secret)||id.equals(store.profileId()))return false;
+        if(id==null||!store.intentSecret().equals(secret)||id.equals(store.profileId()))return switchHarnessForIntent();
         if(!store.switchProfile(id)){in.removeExtra(EXTRA_SESSION);in.removeExtra(JobsActivity.EXTRA_JOB_ID);android.widget.Toast.makeText(this,"That profile was removed",android.widget.Toast.LENGTH_SHORT).show();return false;}
+        startActivity(new Intent(in).setClass(this,MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK|Intent.FLAG_ACTIVITY_CLEAR_TASK));finish();return true;
+    }
+    /** Same profile, other harness (a Codex reply tapped while on Hermes): switch like the harness picker, then start over. */
+    private boolean switchHarnessForIntent(){
+        Intent in=getIntent();String h=in.getStringExtra(EXTRA_HARNESS);in.removeExtra(EXTRA_HARNESS);
+        if(h==null||h.equals(store.serverType())||!store.intentSecret().equals(in.getStringExtra(EXTRA_PROFILE_SECRET))||!store.harnessReady(h))return false;
+        store.serverType(h);Reach.configure(store);
         startActivity(new Intent(in).setClass(this,MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK|Intent.FLAG_ACTIVITY_CLEAR_TASK));finish();return true;
     }
     private void buildSplash(){LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);root.setBackgroundColor(Ui.BG);LinearLayout bar=new LinearLayout(this);bar.setBackgroundColor(Ui.BAR);ImageButton back=Ui.icon(this,R.drawable.ic_back,"Back");back.setOnClickListener(v->onBackPressed());bar.addView(back,new LinearLayout.LayoutParams(Ui.dp(this,52),Ui.dp(this,56)));root.addView(bar);LinearLayout center=new LinearLayout(this);center.setOrientation(LinearLayout.VERTICAL);center.setGravity(Gravity.CENTER);String profile=store.profileName();center.addView(Ui.avatar(this,profile,Ui.BLUE,72),new LinearLayout.LayoutParams(Ui.dp(this,72),Ui.dp(this,72)));TextView name=Ui.text(this,profile,21,Ui.TEXT,true);name.setGravity(Gravity.CENTER);name.setPadding(0,Ui.dp(this,14),0,0);center.addView(name);status=Ui.text(this,"Opening conversation…",13,Ui.SUB,false);status.setPadding(0,Ui.dp(this,6),0,Ui.dp(this,18));center.addView(status);ProgressBar p=new ProgressBar(this);p.setIndeterminateTintList(android.content.res.ColorStateList.valueOf(Ui.BLUE));center.addView(p,new LinearLayout.LayoutParams(Ui.dp(this,28),Ui.dp(this,28)));root.addView(center,new LinearLayout.LayoutParams(-1,0,1));setContentView(root);if(getIntent().getBooleanExtra(EXTRA_SWITCHING,false))overlay=SwitchOverlay.still(this,profile,store.profileId());}
@@ -86,10 +93,22 @@ public final class MainActivity extends Activity {
             });
         });
     }
-    private void openChat(){if(store.apiKey().isEmpty()){startActivity(new Intent(this,ConnectionActivity.class));finish();return;}String direct=getIntent().getStringExtra(EXTRA_SESSION);if(direct!=null&&!direct.isEmpty()){store.sessionId(direct);Intent i=Nav.chat(this,direct,getIntent().getStringExtra(ChatActivity.EXTRA_TITLE),null);forwardChatExtras(i);Nav.startChat(this,i);finish();overridePendingTransition(0,0);return;}String last=store.sessionId();if(!store.sessionTitle(last).isEmpty()){/* fast path: open the last conversation now; ChatActivity handles one that was deleted */Intent i=Nav.chat(this,last,store.sessionTitle(last),null);forwardChatExtras(i);Nav.startChat(this,i);finish();overridePendingTransition(0,0);return;}AgentBackend api=Backends.create(store);network.submit(()->{try{List<HermesApi.SessionInfo> list=api.listSessions();HermesApi.SessionInfo chosen=null;String wanted=store.sessionId();for(HermesApi.SessionInfo s:list)if(s.id.equals(wanted)){chosen=s;break;}if(chosen==null)for(HermesApi.SessionInfo s:list)if(isAppChat(s)){chosen=s;break;}if(chosen==null)chosen=api.createSession("Mobile");HermesApi.SessionInfo target=chosen;runOnUiThread(()->open(target));}catch(Exception e){runOnUiThread(()->showFailure(e,this::openChat));}});}
+    static HermesApi.SessionInfo findAppChat(AgentBackend api, String wanted) throws Exception {
+        final int pageSize = 200;
+        // Bound startup work; reaching the limit must fail rather than create a duplicate.
+        for (int offset = 0; offset < 10000; offset += pageSize) {
+            List<HermesApi.SessionInfo> page = api.listSessions(pageSize, offset);
+            for (HermesApi.SessionInfo session : page) if (session.id.equals(wanted)) return session;
+            for (HermesApi.SessionInfo session : page) if (isAppChat(session)) return session;
+            if (!HermesApi.hasMoreSessions(page, pageSize)) return null;
+        }
+        throw new Exception("Could not find an app conversation among 10,000 sessions. Open one from Conversations, or start a new chat.");
+    }
+
+    private void openChat(){if(store.apiKey().isEmpty()){startActivity(new Intent(this,ConnectionActivity.class));finish();return;}String direct=getIntent().getStringExtra(EXTRA_SESSION);if(direct!=null&&!direct.isEmpty()){store.sessionId(direct);Intent i=Nav.chat(this,direct,getIntent().getStringExtra(ChatActivity.EXTRA_TITLE),null);forwardChatExtras(i);Nav.startChat(this,i);finish();overridePendingTransition(0,0);return;}String last=store.sessionId();if(!store.sessionTitle(last).isEmpty()){/* fast path: open the last conversation now; ChatActivity handles one that was deleted */Intent i=Nav.chat(this,last,store.sessionTitle(last),null);forwardChatExtras(i);Nav.startChat(this,i);finish();overridePendingTransition(0,0);return;}AgentBackend api=Backends.create(store);network.submit(()->{try{HermesApi.SessionInfo chosen=findAppChat(api,store.sessionId());if(chosen==null)chosen=api.createSession("Mobile");HermesApi.SessionInfo target=chosen;runOnUiThread(()->open(target));}catch(Exception e){runOnUiThread(()->showFailure(e,this::openChat));}});}
     /** "New conversation" shortcut: always creates a fresh session rather than reopening the last one. */
     private void newChat(){
-        if(store.apiKey().isEmpty()){startActivity(new Intent(this,ConnectionActivity.class));finish();return;}
+        if(store.apiKey().isEmpty()){startActivity(new Intent(this,ConnectionActivity.class).putExtra(ConnectionActivity.EXTRA_OPEN_NEW_CHAT,true));finish();return;}
         AgentBackend api=Backends.create(store);
         network.submit(()->{
             try{HermesApi.SessionInfo s=api.createSession("New conversation");runOnUiThread(()->open(s));}
@@ -106,7 +125,7 @@ public final class MainActivity extends Activity {
     private void forwardChatExtras(Intent i){
         Intent from=getIntent();
         String prompt=from.getStringExtra(ChatActivity.EXTRA_PROMPT);
-        if(prompt!=null)i.putExtra(ChatActivity.EXTRA_PROMPT,prompt);
+        if(prompt!=null&&(from.getFlags()&Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY)==0)i.putExtra(ChatActivity.EXTRA_PROMPT,prompt); // reopened from recents: don't send it again
         i.putExtra(ChatActivity.EXTRA_AUTOSEND,from.getBooleanExtra(ChatActivity.EXTRA_AUTOSEND,true));
         i.putExtra(EXTRA_PROFILE_SECRET,from.getStringExtra(EXTRA_PROFILE_SECRET));
         if(from.getBooleanExtra(EXTRA_SWITCHING,false))i.putExtra(EXTRA_SWITCHING,true).addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION);

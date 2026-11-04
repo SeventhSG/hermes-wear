@@ -28,11 +28,15 @@ public final class CrashReporter {
                 final String stack = sw.toString();
                 try {
                     context.getSharedPreferences("crash", Context.MODE_PRIVATE).edit()
-                            .putString("last", stack).apply();
+                            .putString("last", stack).commit();
                     Intent i = new Intent(context, CrashActivity.class)
                             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP)
                             .putExtra("stack", stack);
                     context.startActivity(i);
+                    // CrashActivity runs in its own process (:crash). Without this the main thread is dead but the
+                    // process lives on as a frozen window; end it like the system would.
+                    android.os.Process.killProcess(android.os.Process.myPid());
+                    System.exit(10);
                 } catch (Throwable ignored) {
                     // Last resort: keep the default behaviour.
                     if (prev != null) prev.uncaughtException(thread, throwable);

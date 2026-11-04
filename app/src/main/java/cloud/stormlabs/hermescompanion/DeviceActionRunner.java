@@ -501,18 +501,18 @@ final class DeviceActionRunner {
         } catch (Throwable t) { return null; }
     }
 
-    /** Recent messages the notification listener holds (opted-in chat apps, last 10 minutes), newest first. */
+    /** Recent messages the notification listener holds (watched chat apps, last 24 hours), newest first. */
     private static Outcome getMessages(DeviceActions.Action a) {
         List<Map.Entry<String, ReplyListenerService.Source>> list = new ArrayList<>();
         for (Map.Entry<String, ReplyListenerService.Source> e : ReplyListenerService.SOURCES.entrySet()) if (e.getValue().fresh()) list.add(e);
         if (list.isEmpty()) return new Outcome(a, true, "No recent messages").withResult(
-                "No messages in the last 10 minutes from the chat apps the user opted in (reply drafting decides which apps are read).");
+                "No messages in the last 24 hours from the chat apps Hermes watches (Settings › Permission centre › Messages).");
         list.sort((x, y) -> Long.compare(y.getValue().seen, x.getValue().seen));
         StringBuilder b = new StringBuilder();
         for (Map.Entry<String, ReplyListenerService.Source> e : list) {
             ReplyListenerService.Source m = e.getValue();
             b.append("id ").append(messageId(e.getKey())).append(" · ").append(m.app).append(" · ").append(m.sender)
-                    .append(": ").append(m.message).append(m.canSend() ? "" : " (no reply action)").append('\n');
+                    .append(": ").append(m.message).append(m.canSend() ? "" : m.gone ? " (already read; use message {app, contact, text})" : " (no reply action)").append('\n');
         }
         return new Outcome(a, true, list.size() + " recent message" + (list.size() == 1 ? "" : "s")).withResult(b.toString().trim());
     }
@@ -537,7 +537,7 @@ final class DeviceActionRunner {
                 return new Outcome(a, true, "Replied to " + m.sender);
             } catch (Exception ex) { return fail(a, "The app rejected the reply"); }
         }
-        return fail(a, "That message is gone (older than 10 minutes or already answered); call get_messages again");
+        return fail(a, "That message is gone (older than 24 hours or already answered); call get_messages again");
     }
 
     /** WhatsApp, Telegram, Viber or Signal: open the chat with the text via the app's deep link, then press Send. */

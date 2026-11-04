@@ -251,7 +251,7 @@ public final class StatusActivity extends Activity {
         staleBanner();
         summaryCard();
         hermesCard();
-        usageCard();
+        if ("Hermes".equals(store.serverType())) usageCard(); // the bridges report usage per chat (the meter), not per day
         if (hubOn) { pveHostCard(); hostCard(); proxmoxCard(); servicesCard(); networkCard(); securityCard(); syncCard(); backupsCard(); updatesCard(); } else hubHint();
         platformsCard();
         capabilitiesCard();
@@ -331,7 +331,7 @@ public final class StatusActivity extends Activity {
         heroSentence.setEllipsize(TextUtils.TruncateAt.END);
         heroSentence.setOnClickListener(v -> { if (!heroReasons.isEmpty()) open(heroReasons.get(0)); });
         hero.addView(heroSentence, match(-2));
-        heroAsk = Ui.pillButton(this, "Ask Hermes to investigate", R.drawable.ic_assistant, Ui.BLUE, Ui.BLUE, android.graphics.Color.WHITE);
+        heroAsk = Ui.pillButton(this, "Ask " + store.serverType() + " to investigate", R.drawable.ic_assistant, Ui.BLUE, Ui.BLUE, android.graphics.Color.WHITE);
         heroAsk.setMinHeight(dp(48));
         Ui.press(heroAsk);
         heroAsk.setOnClickListener(v -> {
@@ -368,7 +368,7 @@ public final class StatusActivity extends Activity {
         heroWord.setText(word);
         heroWord.setTextColor(color);
         heroWord.setContentDescription("System " + word.toLowerCase(Locale.ROOT));
-        String healthy = hubOn ? "Hermes, host and " + (ops == null ? 0 : ops.services.size()) + " services are fine" : "Hermes is fine";
+        String healthy = hubOn ? "Hermes, host and " + (ops == null ? 0 : ops.services.size()) + " services are fine" : store.serverType() + " is fine";
         heroSentence.setText(OpsText.sentence(reasons, checking, healthy));
         heroSentence.setTextColor(reasons.isEmpty() ? Ui.SUB : Ui.TEXT);
         heroSentence.setMinHeight(reasons.isEmpty() ? 0 : dp(48));
@@ -402,10 +402,10 @@ public final class StatusActivity extends Activity {
             String title = ((TextView) anchor).getText().toString().split(" \u00b7 ")[0].trim();
             if (first == null) first = anchor;
             if (title.startsWith("ALSO NEEDS")) continue; // directly below the chips anyway
-            String label = title.isEmpty() ? "" : title.substring(0, 1) + title.substring(1).toLowerCase(Locale.ROOT);
+            String label = title.equalsIgnoreCase(store.serverType()) ? store.serverType() : title.isEmpty() ? "" : title.substring(0, 1) + title.substring(1).toLowerCase(Locale.ROOT);
             TextView chip = Ui.text(this, label, 12.5f, Ui.SUB, false);
-            chip.setGravity(Gravity.CENTER); chip.setPadding(dp(12), 0, dp(12), 0); chip.setMinHeight(dp(40));
-            chip.setBackground(Ui.stroke(this, android.graphics.Color.TRANSPARENT, Ui.LINE, 99));
+            chip.setGravity(Gravity.CENTER); chip.setPadding(dp(12), 0, dp(12), 0); chip.setMinHeight(dp(32));
+            chip.setBackground(Ui.round(this, Ui.tier(2), 99));
             chip.setOnClickListener(v -> scroll.smoothScrollTo(0, anchor.getTop()));
             LinearLayout target = new LinearLayout(this); target.setGravity(Gravity.CENTER_VERTICAL);
             target.addView(chip, new LinearLayout.LayoutParams(-2, -2));
@@ -440,7 +440,7 @@ public final class StatusActivity extends Activity {
     // ---------------------------------------------------------------- hermes
 
     private void hermesCard() {
-        LinearLayout card = section("Hermes", "hermes");
+        LinearLayout card = section(store.serverType(), "hermes");
         if (health == null) { card.addView(healthError != null ? errorRow(healthError) : skeleton(), match(-2)); body.addView(card, match(-2)); return; }
         JSONObject h = health;
         String gateway = SystemHealth.text(h, "gateway_state", "gateway");
@@ -448,7 +448,7 @@ public final class StatusActivity extends Activity {
         String active = SystemHealth.text(h, "active_agents", "agents_active"), busy = SystemHealth.text(h, "gateway_busy", "busy");
         String heartbeatRaw = SystemHealth.text(h, "last_heartbeat", "updated_at", "heartbeat_at");
         String headline = OpsText.hermesHeadline(active, busy);
-        StringBuilder sub = new StringBuilder(OpsText.gatewayLine(status));
+        StringBuilder sub = new StringBuilder("Hermes".equals(store.serverType()) ? OpsText.gatewayLine(status) : "Bridge " + status);
         if (!heartbeatRaw.isEmpty()) sub.append(sub.length() > 0 ? " · " : "").append("Last heartbeat ").append(TimeFmt.lastSeen(heartbeatRaw));
         LinearLayout head = new LinearLayout(this);
         head.setOrientation(LinearLayout.VERTICAL);
@@ -467,7 +467,8 @@ public final class StatusActivity extends Activity {
         }
         head.setContentDescription(headline + (sub.length() > 0 ? ". " + sub : ""));
         card.addView(head, match(-2));
-        kvMono(card, "Version", SystemHealth.text(h, "version", "hermes_version", "app_version"));
+        String version = SystemHealth.text(h, "version", "hermes_version", "app_version");
+        if (!version.isEmpty()) kvMono(card, "Version", version);
         String model = caps == null ? "" : SystemHealth.text(caps, "model", "default_model");
         if (!model.isEmpty()) kvMono(card, "Model", model);
         List<String> readiness = SystemHealth.readinessLines(h.optJSONObject("readiness"), ops != null);
@@ -500,9 +501,9 @@ public final class StatusActivity extends Activity {
         row.setPadding(dp(16), 0, dp(16), 0);
         row.setBackground(Ui.ripple(this, android.graphics.Color.TRANSPARENT, 12));
         row.addView(Ui.caption(this, label, Ui.SUB), new LinearLayout.LayoutParams(0, -2, 1));
-        TextView chev = Ui.body(this, "›", Ui.FAINT);
-        chev.setRotation(open ? 90 : 0);
-        row.addView(chev);
+        View chev = Ui.chevron(this);
+        chev.setRotation(open ? 0 : -90);
+        row.addView(chev, new LinearLayout.LayoutParams(dp(18), dp(18)));
         row.setContentDescription(label + (open ? ", expanded" : ", collapsed"));
         row.setOnClickListener(v -> flip.run());
         Ui.press(row);
@@ -905,7 +906,10 @@ public final class StatusActivity extends Activity {
             text.addView(m);
         }
         row.addView(text, new LinearLayout.LayoutParams(0, -2, 1));
-        if (tag != null && !tag.isEmpty()) row.addView("›".equals(tag) ? Ui.body(this, tag, Ui.FAINT) : Ui.num(this, tag, 12, Ui.SUB));
+        if (tag != null && !tag.isEmpty()) {
+            boolean arrow = "›".equals(tag);
+            row.addView(arrow ? Ui.chevron(this) : Ui.num(this, tag, 12, Ui.SUB), arrow ? new LinearLayout.LayoutParams(dp(18), dp(18)) : new LinearLayout.LayoutParams(-2, -2));
+        }
         row.setContentDescription(title + (meta == null || meta.isEmpty() ? "" : ", " + meta) + (click == null ? "" : ". Tap for details"));
         if (click != null) {
             row.setBackground(Ui.ripple(this, android.graphics.Color.TRANSPARENT, 12));

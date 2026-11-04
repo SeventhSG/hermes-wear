@@ -11,6 +11,13 @@ final class Accent {
     /** 0 = keep the theme's own accent. */
     static final int[] COLORS = {0, 0xff4f8ff7, 0xff2fc7dc, 0xff35c47c, 0xff9ccf3a, 0xfff2b544, 0xfff5873b, 0xffec5a5a, 0xffe7599f, 0xff9a78f2};
 
+    /** "#1a2b3c" or "1a2b3c" -> opaque colour; null when it is not a 6-digit hex colour. */
+    static Integer hex(String s) {
+        String v = s == null ? "" : s.trim().replace("#", "");
+        if (!v.matches("[0-9a-fA-F]{6}")) return null;
+        return 0xff000000 | Integer.parseInt(v, 16);
+    }
+
     static double luminance(int c) {
         double[] v = {(c >> 16) & 255, (c >> 8) & 255, c & 255};
         for (int i = 0; i < 3; i++) { double s = v[i] / 255; v[i] = s <= .03928 ? s / 12.92 : Math.pow((s + .055) / 1.055, 2.4); }

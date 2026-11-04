@@ -132,12 +132,34 @@ public final class Concept {
             new int[]{0xfff3f5ef, 0xffffffff, 0xffe8ece1, 0xffdde3d3},
             true, Chat.BUBBLES, 0, 16, 12, true);
 
+    /** Settings › Appearance › Custom theme: one background colour, the rest derived so text and tiers stay readable. */
+    public static Concept custom(int bg) {
+        bg |= 0xff000000;
+        boolean light = Accent.luminance(bg) > .35;
+        int text = light ? 0xff1c1b18 : 0xffeef1f5;
+        for (int i = 0; i < 20 && Accent.contrast(text, bg) < 7; i++) bg = light ? Accent.lighter(bg, .1f) : Accent.darker(bg, .1f);  // mid tones: nudge until text reads
+        int t1 = light ? Accent.lighter(bg, .55f) : Accent.lighter(bg, .05f), t2 = light ? Accent.darker(bg, .05f) : Accent.lighter(bg, .09f);
+        int t3 = light ? Accent.lighter(bg, .85f) : Accent.lighter(bg, .13f);
+        int accent = light ? 0xff2f6fd6 : 0xff6ea8ff;
+        return new Concept("custom", "Custom", "Your own background colour", Style.CONSOLE,
+                new int[]{bg, light ? Accent.lighter(bg, .4f) : Accent.lighter(bg, .03f), t1, t2, light ? Accent.darker(bg, .12f) : Accent.lighter(bg, .17f),
+                        text, Accent.mix(text, bg, .3f), Accent.mix(text, bg, .42f),
+                        accent, light ? 0xff2a5fb8 : 0xff2f62c0, light ? 0xff0e8f6e : 0xff3ddbb0, light ? 0xffa86f00 : 0xfff2b544, light ? 0xffd23f3f : 0xffff6b6b,
+                        accent, light ? 0xff9a4f00 : 0xfff2b544, light ? Accent.darker(bg, .06f) : Accent.darker(bg, .35f), light ? 0xff2b2925 : 0xffdce3ec,
+                        light ? 0xff2f6fd6 : 0xff2f66d0, light ? 0xff2a5fb8 : 0xff2858b8, light ? 0xffd6e4fb : 0xffb4d2ff},
+                new int[]{bg, t1, t2, t3}, light, Chat.FLAT, light ? 160 : 15, 14, 10, light);
+    }
+
+    /** The stored custom theme (set by Ui.apply from settings). */
+    static volatile Concept custom = custom(0xff101418);
+
     public static final Concept DEFAULT = CONSOLE_DARK;
     public static final Concept[] ALL = {CONSOLE_DARK, CONSOLE_LIGHT, REFINED_DARK, REFINED_LIGHT, OLED, EMBER, VIOLET, NORD, FOREST, SKY, SAGE};
 
     /** Stored id → concept. Retired ids map to the nearest new look; unknown or missing is the default. */
     public static Concept byId(String id) {
         if (id == null) return DEFAULT;
+        if (id.equals("custom")) return custom;
         for (Concept c : ALL) if (c.id.equals(id)) return c;
         switch (id) {
             case "graphite": case "midnight": case "terminal": case "dynamic": return REFINED_DARK;

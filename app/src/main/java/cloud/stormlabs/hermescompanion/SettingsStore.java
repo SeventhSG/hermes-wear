@@ -165,7 +165,7 @@ public final class SettingsStore {
     public String profileName() {
         String n = prefs.getString("profile_name", "");
         // A /p/<name> profile ("Pentest") is a Hermes profile: under Claude Code or Codex the harness is the identity.
-        if (!"Hermes".equals(serverType()) && isHermesSubProfile()) return serverType();
+        if (!"Hermes".equals(serverType()) && (isHermesSubProfile() || n == null || n.trim().isEmpty() || "Hermes".equals(n))) return serverType();
         return n == null || n.trim().isEmpty() ? Profiles.defaultName(endpoint()) : n;
     }
 
@@ -345,6 +345,14 @@ public final class SettingsStore {
         if (!value) edit.remove("wake_pause_end").remove("wake_pause_started_elapsed");
         edit.apply();
     }
+    /** Custom wake phrase as typed ("" = Hey Hermes), its spotter tokens, and the threshold training picked (0 = untrained). */
+    public String wakePhrase() { return prefs.getString("wake_phrase", ""); }
+    public String wakeTokens() { return prefs.getString("wake_tokens", ""); }
+    public float wakeThreshold() { return prefs.getFloat("wake_threshold", 0f); }
+    public void wakePhrase(String phrase, String tokens) { prefs.edit().putString("wake_phrase", phrase).putString("wake_tokens", tokens).remove("wake_threshold").apply(); }
+    public void wakeThreshold(float t) { prefs.edit().putFloat("wake_threshold", t).apply(); }
+    /** "Hey Hermes" or the custom phrase, for labels. */
+    public String wakeLabel() { return wakeTokens().isEmpty() ? "Hey Hermes" : WakePhrase.label(wakePhrase()); }
     public String wakeSensitivity() { return prefs.getString("wake_sensitivity", "Normal"); }
     public void wakeSensitivity(String value) { prefs.edit().putString("wake_sensitivity", value).apply(); }
     public long wakePauseEnd() { return prefs.getLong("wake_pause_end", 0); }
@@ -395,7 +403,7 @@ public final class SettingsStore {
     public boolean conversationMode() { return callActive || prefs.getBoolean("conversation_mode", true); }
     public void conversationMode(boolean v) { prefs.edit().putBoolean("conversation_mode", v).apply(); }
     /** Settings › Appearance: a Concept id; unknown ids fall back to Graphite in Concept.byId. */
-    public String uiConcept() { return prefs.getString("ui_concept", Concept.DEFAULT.id); }
+    public String uiConcept() { return prefs.getString("ui_concept", BuildConfig.BRAND_THEME); }
     public void uiConcept(String id) { prefs.edit().putString("ui_concept", Concept.byId(id).id).apply(); }
     /** Server-kit modules last chosen in the setup sheet (comma-separated ids); empty = the kit's defaults. */
     public String kitModules() { return prefs.getString("kit_modules", ""); }
@@ -404,7 +412,13 @@ public final class SettingsStore {
     public String jobSort() { return prefs.getString("job_sort", "SMART"); }
     public void jobSort(String mode) { prefs.edit().putString("job_sort", mode == null ? "SMART" : mode).apply(); }
     /** Accent colour override (ARGB), 0 = the theme's own. */
-    public int uiAccent() { return prefs.getInt("ui_accent", 0); }
+    public int uiAccent() { return prefs.getInt("ui_accent", BuildConfig.BRAND_ACCENT); }
+    /** Background of the Custom theme (Concept.custom). */
+    public int uiCustomBg() { return prefs.getInt("ui_custom_bg", BuildConfig.BRAND_BACKGROUND == 0 ? 0xff101418 : BuildConfig.BRAND_BACKGROUND); }
+    public void uiCustomBg(int argb) { prefs.edit().putInt("ui_custom_bg", argb).apply(); }
+    /** Branding: your name for the Hermes agent ("" = Hermes). */
+    public String brandName() { return prefs.getString("brand_name", BuildConfig.BRAND_NAME); }
+    public void brandName(String v) { prefs.edit().putString("brand_name", v == null ? "" : v.trim()).apply(); }
     public void uiAccent(int argb) { prefs.edit().putInt("ui_accent", argb).apply(); }
     /** Bottom-bar tabs (Tabs layout) as comma-separated Tab names; empty = the default five. */
     public String uiTabs() { return prefs.getString("ui_tabs", ""); }
@@ -560,6 +574,19 @@ public final class SettingsStore {
         if (allowed) apps.add(name); else apps.remove(name);
         prefs.edit().putStringSet("reply_apps", apps).apply();
     }
+    /** Reply suggestions watch every messaging app except muted ones; off = only the apps in replyApps. */
+    public boolean replyAllApps() { return prefs.getBoolean("reply_all_apps", true); }
+    public void replyAllApps(boolean v) { prefs.edit().putBoolean("reply_all_apps", v).apply(); }
+    public Set<String> replyMuted() { return new HashSet<>(prefs.getStringSet("reply_muted", Collections.emptySet())); }
+    public void replyMute(String pkg, boolean muted) {
+        Set<String> apps = replyMuted();
+        if (muted) apps.add(pkg); else apps.remove(pkg);
+        prefs.edit().putStringSet("reply_muted", apps).apply();
+    }
+    /** Off (default): messages are read quietly and only a spotted plan makes a notification. */
+    public boolean replyEveryMessage() { return prefs.getBoolean("reply_every_message", false); }
+    public void replyEveryMessage(boolean v) { prefs.edit().putBoolean("reply_every_message", v).apply(); }
+    public boolean replyWatches(String pkg) { return replyAllApps() ? !replyMuted().contains(pkg) : replyApps().contains(pkg); }
     /** Read notifications aloud into earbuds (needs notification access). Apps: empty = the messaging apps. */
     public boolean readNotifications() { return prefs.getBoolean("read_notifs", false); }
     public void readNotifications(boolean v) { prefs.edit().putBoolean("read_notifs", v).apply(); }

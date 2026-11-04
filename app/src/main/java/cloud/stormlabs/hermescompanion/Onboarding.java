@@ -1,10 +1,9 @@
 package cloud.stormlabs.hermescompanion;
 
-/** Pure state for the first-run tour (OnboardingActivity): routing, paging and permission-row states. */
+/** Pure state for the first-run tour (OnboardingActivity): routing and paging. */
 final class Onboarding {
-    /** Welcome, what you need, tour 1, tour 2, permissions, connect. */
-    static final int PAGES = 6, PERMISSIONS_PAGE = 4;
-    static final int GRANTED = 0, ASK = 1, BLOCKED = 2;
+    /** Welcome, connect, connected. */
+    static final int PAGES = 3;
 
     private Onboarding() { }
 
@@ -16,11 +15,8 @@ final class Onboarding {
 
     static boolean isLast(int page) { return page >= PAGES - 1; }
 
-    /** Granted wins; a request the system will no longer show sends the user to App info instead. */
-    static int permState(boolean granted, boolean blocked) { return granted ? GRANTED : blocked ? BLOCKED : ASK; }
-
-    static String actionLabel(int state) { return state == GRANTED ? "Granted ✓" : state == BLOCKED ? "App info" : "Allow"; }
-
-    /** The last page's main button. */
-    static String primaryLabel(boolean connected) { return connected ? "Done" : "Connect to my server"; }
+    /** The setup action stays in the fixed footer, clear of scrolling content. */
+    static String primaryLabel(boolean connected, boolean hubReady) {
+        return !connected ? "Connect to my server" : hubReady ? "Start chatting" : "Set up my server";
+    }
 }

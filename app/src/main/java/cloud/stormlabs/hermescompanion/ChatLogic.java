@@ -4,12 +4,24 @@ package cloud.stormlabs.hermescompanion;
 final class ChatLogic {
     private ChatLogic() {}
 
+    static boolean serverStatus(String harness, boolean hub, String command) {
+        return "Hermes".equals(harness) && hub && "status".equals(command);
+    }
+
     /** "google/gemini-3-flash-preview" becomes "gemini-3-flash-preview"; blank becomes "Default model". */
     static String shortModel(String id) {
         String m = id == null ? "" : id.trim();
         if (m.isEmpty()) return "Default model";
         int slash = m.lastIndexOf('/');
-        return slash >= 0 && slash < m.length() - 1 ? m.substring(slash + 1) : m;
+        m = slash >= 0 && slash < m.length() - 1 ? m.substring(slash + 1) : m;
+        java.util.regex.Matcher known = java.util.regex.Pattern.compile("claude-(opus|sonnet|haiku|fable)(?:-(\\d+(?:-\\d+)*))?").matcher(m);
+        if (known.matches()) {
+            String family = known.group(1);
+            return Character.toUpperCase(family.charAt(0)) + family.substring(1)
+                    + (known.group(2) == null ? "" : " " + known.group(2).replace('-', '.'));
+        }
+        if (m.equals("opus") || m.equals("sonnet") || m.equals("haiku")) return Character.toUpperCase(m.charAt(0)) + m.substring(1);
+        return m;
     }
 
     /** Empty-chat suggestion chips: {label, prompt sent when tapped}. */
@@ -19,6 +31,45 @@ final class ChatLogic {
             {"Summarise my unread", "Summarise my unread messages and tell me what needs a reply."}};
 
     static final String EMPTY_PROMPT = "Ask me anything — I can also check your homelab.";
+
+    static String recoveryDraft(String failed, String draft) {
+        String text = failed == null ? "" : failed;
+        String current = draft == null ? "" : draft;
+        if (text.isEmpty() || current.equals(text) || current.startsWith(text + "\n\n")) return current;
+        return current.isEmpty() ? text : text + "\n\n" + current;
+    }
+
+    static String draftAfterRecovery(String failed, String draft) {
+        if (failed == null || failed.isEmpty()) return draft;
+        if (draft.equals(failed)) return "";
+        return draft.startsWith(failed + "\n\n") ? draft.substring(failed.length() + 2) : draft;
+    }
+
+    static boolean allowNewChat(boolean empty, boolean busy, boolean error) {
+        return !empty || busy || error;
+    }
+
+    static boolean hermesAction(String title) {
+        return "Receipt".equals(title) || "Shopping".equals(title) || "Next actions".equals(title)
+                || "Audit server".equals(title) || "Home Assistant".equals(title)
+                || "Skills".equals(title) || "Schedule".equals(title) || "Recall".equals(title);
+    }
+
+    static String emptyPrompt(String harness, boolean hub) {
+        if (!"Hermes".equals(harness)) return "What would you like to build with " + harness + "?";
+        return hub ? EMPTY_PROMPT : "What can I help you with?";
+    }
+
+    static String[][] suggestions(String harness, boolean hub) {
+        if (!"Hermes".equals(harness)) return new String[][] {
+                {"Explore this project", "Explain this project's structure and where to start."},
+                {"Find a bug", "Review this project for bugs and suggest a focused fix."},
+                {"Plan a change", "Help me plan a change to this project. Ask me what I want to build."}};
+        return hub ? SUGGESTIONS : new String[][] {
+                {"Explain something", "Help me understand a topic. Ask me what I would like to learn."},
+                {"Make a plan", "Help me make a practical plan. Ask me what I want to accomplish."},
+                {"Help me write", "Help me write something clearly. Ask me what I need to write."}};
+    }
 
     /** Overflow menu groups: 0 primary tiles, 1 "More" rows, 2 destructive (last, separated). */
     static int overflowGroup(String title) {
@@ -32,9 +83,11 @@ final class ChatLogic {
     static String presence(boolean replying) { return replying ? "Hermes is replying" : "Hermes"; }
 
     /** Human sentence first, the server's raw reason second (only when there is one). */
-    static String runFailure(String raw) {
+    static String runFailure(String raw) { return runFailure("Hermes", raw); }
+
+    static String runFailure(String agent, String raw) {
         String why = raw == null ? "" : raw.trim();
-        return "Hermes couldn't finish that. Tap to try again." + (why.isEmpty() ? "" : "\n" + why);
+        return agent + " couldn't finish that. Tap to try again." + (why.isEmpty() ? "" : "\n" + why);
     }
 
     /** Height/width ratio of an image, defaulting to 3:4 until it is known. */
@@ -87,6 +140,15 @@ final class ChatLogic {
         return t.substring(start + 1, end > start ? end : t.length()).trim();
     }
 
+    static final String ORIGIN_OPEN = "Gateway message origin (", ORIGIN_END = "fields are insufficient.";
+
+    /** A message sent while Hermes was busy is stored behind the gateway's routing note; show only what the user wrote. */
+    static String stripOrigin(String content) {
+        if (content == null || !content.trim().startsWith(ORIGIN_OPEN)) return content;
+        int end = content.indexOf(ORIGIN_END);
+        return end < 0 ? content : content.substring(end + ORIGIN_END.length()).trim();
+    }
+
     /** The server keeps no image parts: a plain chat stores "[screenshot]", the gateway a vision description. */
     static boolean isImageTurn(String content) {
         return content != null && (content.startsWith("[The user sent an image~") || content.contains("\n[screenshot]") || content.trim().equals("[screenshot]"));
@@ -99,7 +161,13 @@ final class ChatLogic {
     }
 
     /** How a steer reads in the chat: labelled, so it is not mistaken for a new turn. */
-    static String steerShown(String text) { return "*Steer*\n" + text; }
+    static String steerShown(String text) { return steerShown(text, false); }
+
+    static String steerShown(String text, boolean queued) {
+        return "*Steer*\n" + (queued ? "Queued, will be sent after this answer\n\n" : "") + text;
+    }
+
+    static boolean queuedSteer(String status) { return "queued".equals(status) || "pending_steer".equals(status); }
 
     /** The capture pipeline answers with {"summary","reply","actions":[{kind,text,priority}]}: show it as words, not JSON. Else null. */
     static String captureReply(String content) {

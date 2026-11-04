@@ -20,7 +20,8 @@ final class ChatViews {
         View v = Ui.hermesLogo(c, size);
         v.setContentDescription(ChatLogic.presence(replying));
         if (replying && Ui.motionEnabled()) {
-            ObjectAnimator a = ObjectAnimator.ofFloat(v, View.ROTATION, 0f, 360f);
+            // A custom logo (a photo) pulses instead of spinning.
+            ObjectAnimator a = v instanceof ImageView ? ObjectAnimator.ofFloat(v, View.ALPHA, 1f, .45f, 1f) : ObjectAnimator.ofFloat(v, View.ROTATION, 0f, 360f);
             a.setDuration(4000); a.setInterpolator(new LinearInterpolator()); a.setRepeatCount(ValueAnimator.INFINITE);
             a.setCurrentPlayTime(android.os.SystemClock.uptimeMillis() % 4000);
             v.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
@@ -28,6 +29,23 @@ final class ChatViews {
                 public void onViewDetachedFromWindow(View x) { a.cancel(); }
             });
         }
+        return v;
+    }
+
+    static View mark(Context c, int size, boolean replying, String agent) {
+        if ("Hermes".equals(agent)) return mark(c, size, replying);
+        android.widget.TextView v = Ui.text(c, "Codex".equals(agent) ? ">_" : "✳", size / 2, Ui.BLUE, true);
+        v.setGravity(android.view.Gravity.CENTER);
+        v.setContentDescription(agent + (replying ? " is replying" : ""));
+        return v;
+    }
+
+    static View systemNote(Context c, String content) {
+        android.widget.TextView v = Ui.caption(c, content, Ui.SUB);
+        v.setGravity(android.view.Gravity.CENTER);
+        v.setPadding(Ui.dp(c, 16), Ui.dp(c, 8), Ui.dp(c, 16), Ui.dp(c, 8));
+        v.setSingleLine(true); v.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        v.setOnClickListener(view -> { boolean expand = v.getMaxLines() == 1; v.setSingleLine(!expand); v.setEllipsize(expand ? null : android.text.TextUtils.TruncateAt.END); });
         return v;
     }
 

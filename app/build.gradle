@@ -12,16 +12,24 @@ android {
     namespace 'cloud.stormlabs.hermescompanion'
     compileSdk 35
 
-    buildFeatures { aidl true }
+    buildFeatures { aidl true; buildConfig true }
 
     defaultConfig {
         applicationId 'com.stormlabs.hermescompanion' // matches the Firebase app; Java package stays cloud.stormlabs.hermescompanion
         minSdk 26
         targetSdk 35
-        versionCode 141
-        versionName '7.65.1'
+        versionCode 162
+        versionName '7.77.0'
         testInstrumentationRunner 'android.test.InstrumentationTestRunner'
         ndk { abiFilters 'arm64-v8a' }
+        // Branding defaults from gradle.properties (brand.*), see the comment there.
+        def brand = { key, fallback -> (project.findProperty(key) ?: fallback).toString().trim() }
+        def brandHex = { key -> brand(key, '') ? '0xff' + brand(key, '').replace('#', '') : '0' }
+        manifestPlaceholders = [appLabel: brand('brand.label', 'Hermes')]
+        buildConfigField 'String', 'BRAND_NAME', '"' + brand('brand.name', '') + '"'
+        buildConfigField 'String', 'BRAND_THEME', '"' + brand('brand.theme', 'console') + '"'
+        buildConfigField 'int', 'BRAND_BACKGROUND', brandHex('brand.background')
+        buildConfigField 'int', 'BRAND_ACCENT', brandHex('brand.accent')
     }
 
     signingConfigs {

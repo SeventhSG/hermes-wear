@@ -26,10 +26,15 @@ public class HermesApiProtocolTest {
     private static final class Recorder implements HermesApi.StreamListener {
         final StringBuilder deltas = new StringBuilder(), reasoning = new StringBuilder();
         final List<String> tools = new ArrayList<>(), commentary = new ArrayList<>(), errors = new ArrayList<>();
+        final List<String> toolIds = new ArrayList<>();
         String runId, complete; HermesApi.Approval approval; HermesApi.RunOutcome outcome;
         public void onRunStarted(String id) { runId = id; }
         public void onDelta(String d) { deltas.append(d); }
         public void onTool(String state, String name, String preview) { tools.add(state + ":" + name + ":" + preview); }
+        @Override public void onToolEvent(String state, String name, String preview, String argsJson, String itemId) {
+            toolIds.add(itemId);
+            onTool(state, name, preview);
+        }
         public void onComplete(String text) { complete = text; }
         public void onError(String e) { errors.add(e); }
         @Override public void onReasoning(String d) { reasoning.append(d); }
@@ -91,6 +96,25 @@ public class HermesApiProtocolTest {
         assertEquals("Hello", r.deltas.toString());
         assertEquals("Hello", r.complete);
         assertTrue(r.errors.isEmpty());
+    }
+
+    @Test public void bothStreamsCarryOptionalToolIds() throws Exception {
+        String events = StubServer.frame("tool.started", "{\"event\":\"tool.started\",\"tool_name\":\"terminal\",\"item_id\":\"one\"}")
+                + StubServer.frame("tool.output", "{\"event\":\"tool.output\",\"tool_name\":\"terminal\",\"item_id\":\"one\",\"preview\":\"out\"}")
+                + StubServer.frame("tool.completed", "{\"event\":\"tool.completed\",\"tool_name\":\"terminal\",\"item_id\":\"one\"}")
+                + StubServer.frame("tool.failed", "{\"event\":\"tool.failed\",\"tool_name\":\"terminal\",\"item_id\":\"two\"}")
+                + StubServer.frame("tool.started", "{\"event\":\"tool.started\",\"tool_name\":\"terminal\"}")
+                + StubServer.frame("run.completed", "{\"event\":\"run.completed\",\"output\":\"done\"}");
+        server.sse("GET /v1/runs/ids/events", events);
+        Recorder durable = new Recorder();
+        api().followRun("ids", null, durable);
+        server.sse("POST /api/sessions/s1/chat/stream", events);
+        Recorder session = new Recorder();
+        api().streamChat("s1", "go", session);
+        assertEquals(java.util.Arrays.asList("one", "one", "one", "two", ""), durable.toolIds);
+        assertEquals(durable.toolIds, session.toolIds);
+        assertTrue(durable.errors.isEmpty());
+        assertTrue(session.errors.isEmpty());
     }
 
     @Test public void streamCarriesEveryEventKind() throws Exception {
@@ -167,6 +191,10 @@ public class HermesApiProtocolTest {
         assertTrue(HermesApi.isSessionNotFound(HermesApi.errorText(404, body)));
         assertFalse(HermesApi.isSessionNotFound(HermesApi.errorText(404, "{\"error\":{\"message\":\"Route not found\"}}")));
         assertFalse(HermesApi.isSessionNotFound(HermesApi.errorText(404, "")));
+        assertTrue(HermesApi.isSessionNotFound("HTTP 404: session not found"));
+        assertTrue(HermesApi.isSessionNotFound("HTTP 404: SESSION NOT FOUND: stale-id"));
+        assertTrue(HermesApi.isSessionNotFound("Bridge error: Session Not Found"));
+        assertFalse(HermesApi.isSessionNotFound("HTTP 404: run not found"));
         assertFalse(HermesApi.isSessionNotFound(null));
     }
 
@@ -253,6 +281,15 @@ public class HermesApiProtocolTest {
         assertEquals("every 30m", created.schedule);
         assertFalse(created.paused());
         assertTrue(api().runJob("abcdef123456").ok);
+    }
+
+    @Test public void modelDescriptionsKeepTheWireId() throws Exception {
+        JSONObject root = new JSONObject("{\"provider\":\"claude\",\"model\":\"sonnet\",\"providers\":["
+                + "{\"slug\":\"claude\",\"authenticated\":true,\"models\":[{\"id\":\"sonnet\",\"description\":\"Balanced speed and capability\"}]}]}");
+        HermesApi.ModelOption option = HermesApi.parseModelOptions(root).get(0);
+        assertEquals("sonnet", option.id);
+        assertEquals("Balanced speed and capability", option.description);
+        assertTrue(option.current);
     }
 
     @Test public void modelOptionsSkipUnauthenticatedProviders() throws Exception {

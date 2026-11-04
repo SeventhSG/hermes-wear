@@ -158,8 +158,16 @@ final class Notifier {
     static String presenceTag(String profileId, String sessionId) { return "presence:" + sessionKey(profileId, sessionId); }
     static String draftTag(String key) { return "draft:" + key; }
 
-    static PendingIntent openChat(Context c, String profileId, String sessionId, String title) {
+    /** A run's chat, on the harness it ran on: a Codex reply tapped while the app is on Hermes switches to Codex. */
+    static PendingIntent openChat(Context c, RunManager.LiveRun run) {
+        return openChat(c, run.profileId, run.sessionId, run.sessionTitle, Backends.type(run.api));
+    }
+
+    static PendingIntent openChat(Context c, String profileId, String sessionId, String title) { return openChat(c, profileId, sessionId, title, null); }
+
+    static PendingIntent openChat(Context c, String profileId, String sessionId, String title, String harness) {
         Intent i = new Intent(c, MainActivity.class).putExtra(MainActivity.EXTRA_OPEN_CHAT, true)
+                .putExtra(MainActivity.EXTRA_HARNESS, harness)
                 .putExtra(MainActivity.EXTRA_SESSION, sessionId).putExtra(ChatActivity.EXTRA_TITLE, title)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         forProfile(c, i, profileId);
@@ -191,13 +199,13 @@ final class Notifier {
     /** The foreground-service notification: what is running, with a Stop button for one run. */
     static Notification running(Context c, java.util.List<RunManager.LiveRun> runs) {
         Notification.Builder b = builder(c, CH_RUNS).setOngoing(true).setOnlyAlertOnce(true).setShowWhen(true);
-        if (runs.isEmpty()) return b.setContentTitle("Hermes").setContentText("Finishing up…").build();
+        if (runs.isEmpty()) return b.setContentTitle("Companion").setContentText("Finishing up…").build();
         RunManager.LiveRun r = runs.get(0);
-        String title = runs.size() == 1 ? "Hermes is working · " + r.sessionTitle : "Hermes is working on " + runs.size() + " conversations";
+        String title = runs.size() == 1 ? Backends.type(r.api) + " is working · " + r.sessionTitle : "Agents are working on " + runs.size() + " conversations";
         b.setContentTitle(title).setContentText(runText(r)).setSubText(RunStatus.step(r.tools.size())).setProgress(0, 0, true)
                 .setWhen(r.startedAt).setUsesChronometer(true)
-                .setContentIntent(openChat(c, r.profileId, r.sessionId, r.sessionTitle));
-        if (runs.size() == 1) b.addAction(new Notification.Action.Builder(null, "Stop", action(c, RunActionReceiver.ACTION_STOP, null, r.sessionId, null, false)).build());
+                .setContentIntent(openChat(c, r));
+        if (runs.size() == 1) b.addAction(new Notification.Action.Builder(null, "Stop", action(c, RunActionReceiver.ACTION_STOP, r.profileId, r.sessionId, null, false)).build());
         return b.build();
     }
 
@@ -216,12 +224,12 @@ final class Notifier {
             StringBuilder body = new StringBuilder(a.description);
             for (int i = 0; i < a.choices.size(); i++) body.append(i == 0 ? "\n\n" : "\n").append(i + 1).append(". ").append(a.choices.get(i));
             Notification.Builder q = builder(c, CH_APPROVALS)
-                    .setContentTitle("Hermes asks · " + run.sessionTitle)
+                    .setContentTitle(Backends.type(run.api) + " asks · " + run.sessionTitle)
                     .setContentText(a.description)
                     .setStyle(new Notification.BigTextStyle().bigText(body))
                     .setCategory(Notification.CATEGORY_REMINDER)
                     .setAutoCancel(true)
-                    .setContentIntent(openChat(c, run.profileId, run.sessionId, run.sessionTitle));
+                    .setContentIntent(openChat(c, run));
             if (Build.VERSION.SDK_INT < 26) q.setPriority(Notification.PRIORITY_HIGH);
             post(c, approvalTag(run.profileId, run.sessionId), ID_APPROVAL, q.build());
             return;
@@ -233,7 +241,7 @@ final class Notifier {
                 .setStyle(new Notification.BigTextStyle().bigText((a.description.isEmpty() ? "" : a.description + "\n\n") + cmd))
                 .setCategory(Notification.CATEGORY_REMINDER)
                 .setAutoCancel(true)
-                .setContentIntent(openChat(c, run.profileId, run.sessionId, run.sessionTitle));
+                .setContentIntent(openChat(c, run));
         if (Build.VERSION.SDK_INT < 26) b.setPriority(Notification.PRIORITY_HIGH);
         if (a.choices.contains("once")) b.addAction(new Notification.Action.Builder(null, "Allow once", action(c, RunActionReceiver.ACTION_APPROVE, run.profileId, run.sessionId, "once", false)).build());
         if (a.choices.contains("session")) b.addAction(new Notification.Action.Builder(null, "This session", action(c, RunActionReceiver.ACTION_APPROVE, run.profileId, run.sessionId, "session", false)).build());
@@ -245,13 +253,13 @@ final class Notifier {
         boolean failed = run.agentFailure != null || run.error != null || (run.outcome != null && !run.outcome.completed());
         String body = resultBody(run, failed);
         Notification.Builder b = builder(c, CH_RESULTS)
-                .setContentTitle((failed ? "Hermes hit a problem · " : "Hermes · ") + run.sessionTitle)
+                .setContentTitle(Backends.type(run.api) + (failed ? " hit a problem · " : " · ") + run.sessionTitle)
                 .setContentText(body)
                 .setStyle(new Notification.BigTextStyle().bigText(body.length() > 4000 ? body.substring(0, 4000) + "…" : body))
                 .setAutoCancel(true)
                 .setCategory(Notification.CATEGORY_MESSAGE)
-                .setContentIntent(openChat(c, run.profileId, run.sessionId, run.sessionTitle));
-        RemoteInput input = new RemoteInput.Builder(KEY_REPLY).setLabel("Reply to Hermes").build();
+                .setContentIntent(openChat(c, run));
+        RemoteInput input = new RemoteInput.Builder(KEY_REPLY).setLabel("Reply to " + Backends.type(run.api)).build();
         b.addAction(new Notification.Action.Builder(null, "Reply", action(c, RunActionReceiver.ACTION_REPLY, run.profileId, run.sessionId, run.sessionTitle, true))
                 .addRemoteInput(input).build());
         post(c, resultTag(run.profileId, run.sessionId), ID_RESULT, b.build());
@@ -395,13 +403,35 @@ final class Notifier {
         post(c, draftTag(key), ID_DRAFT, n);
     }
 
-    static void replyDraft(Context c, String key, String sender, String draft, boolean canSend) {
-        Notification n = builder(c, CH_DRAFTS).setContentTitle("Reply to " + sender)
-                .setContentText(draft).setStyle(new Notification.BigTextStyle().bigText(draft))
-                .addAction(new Notification.Action.Builder(null, canSend ? "Send" : "Copy & open", draftAction(c, canSend ? ReplyDraftReceiver.SEND : ReplyDraftReceiver.COPY, key)).build())
-                .addAction(new Notification.Action.Builder(null, "Edit", draftAction(c, ReplyDraftReceiver.EDIT, key)).build())
-                .build();
-        post(c, draftTag(key), ID_DRAFT, n);
+    static void replyDraft(Context c, String key, ReplyListenerService.Source m) {
+        ReplyExtract.Suggestion s = m.suggestion;
+        StringBuilder body = new StringBuilder(m.draft);
+        if (!s.next.isEmpty()) body.append("\n\n→ ").append(s.next);
+        if (s.hasEvent()) body.append("\n📅 ").append(s.title).append(" · ").append(s.start.replace('T', ' '));
+        String app = m.app;
+        try { app = c.getPackageManager().getApplicationLabel(c.getPackageManager().getApplicationInfo(m.app, 0)).toString(); } catch (Exception ignored) {}
+        Notification.Builder b = builder(c, CH_DRAFTS).setContentTitle(s.hasEvent() ? "📅 Add to calendar? · " + m.sender : "Reply to " + m.sender + " · " + app)
+                .setContentText(s.hasEvent() ? s.title + " · " + s.start.replace('T', ' ') : m.draft).setStyle(new Notification.BigTextStyle().bigText(body))
+                .addAction(new Notification.Action.Builder(null, m.canSend() ? "Send" : "Copy & open", draftAction(c, m.canSend() ? ReplyDraftReceiver.SEND : ReplyDraftReceiver.COPY, key)).build());
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
+        if (s.hasEvent()) {
+            java.time.ZoneId zone = java.time.ZoneId.systemDefault();
+            long start = ReplyExtract.millis(s.start, zone), end = ReplyExtract.millis(s.end, zone);
+            Intent cal = new Intent(Intent.ACTION_INSERT).setData(android.provider.CalendarContract.Events.CONTENT_URI)
+                    .putExtra(android.provider.CalendarContract.Events.TITLE, s.title)
+                    .putExtra(android.provider.CalendarContract.EXTRA_EVENT_BEGIN_TIME, start)
+                    .putExtra(android.provider.CalendarContract.EXTRA_EVENT_END_TIME, end > start ? end : start + (s.allDay() ? 86_400_000L : 3_600_000L))
+                    .putExtra(android.provider.CalendarContract.EXTRA_EVENT_ALL_DAY, s.allDay())
+                    .putExtra(android.provider.CalendarContract.Events.DESCRIPTION, "From " + m.sender + ": " + m.message);
+            if (!s.location.isEmpty()) cal.putExtra(android.provider.CalendarContract.Events.EVENT_LOCATION, s.location);
+            b.addAction(new Notification.Action.Builder(null, "Add to calendar", PendingIntent.getActivity(c, key.hashCode(), cal, flags)).build());
+        }
+        // Opened straight from the notification: Android 12+ blocks activities started by a receiver behind a notification.
+        Intent edit = new Intent(Intent.ACTION_SEND).setType("text/plain").setPackage(m.app).putExtra(Intent.EXTRA_TEXT, m.draft);
+        if (c.getPackageManager().resolveActivity(edit, 0) == null) edit = Intent.createChooser(edit.setPackage(null), "Edit reply");
+        b.addAction(new Notification.Action.Builder(null, "Edit", PendingIntent.getActivity(c, key.hashCode() + 1, edit, flags)).build());
+        b.addAction(new Notification.Action.Builder(null, "Mute " + app, draftAction(c, ReplyDraftReceiver.MUTE, key)).build());
+        post(c, draftTag(key), ID_DRAFT, b.build());
     }
 
     static void replyError(Context c, String key, String error) {

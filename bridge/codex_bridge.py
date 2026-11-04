@@ -8,7 +8,9 @@ the Hermes wire contract the app already uses (/api/sessions, durable /v1/runs w
 import hashlib
 import hmac
 import json
+import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -28,6 +30,29 @@ COMMANDS = [("compact", "Summarize the conversation to free up context"),
             ("goal", "Show or set the thread goal (usage: /goal <objective>)"),
             ("init", "Create an AGENTS.md for this project"),
             ("undo", "Drop the last turns from the history (usage: /undo [N]); files stay as they are")]
+MAX_TOOL_OUTPUT = 40_000
+OUTPUT_INTERVAL = 0.15
+OFFLINE_HINT = "Codex isn't running on the server — reconnecting… Try again shortly."
+logger = logging.getLogger(__name__)
+
+
+def log_failure(context, exc, level=logging.WARNING):
+    # Exception messages can contain daemon payloads, prompts or credentials. Log only the class.
+    logger.log(level, "%s (%s)", context, type(exc).__name__)
+
+
+def capped_output(text, total=None):
+    half = MAX_TOOL_OUTPUT // 2
+    if total is None and re.fullmatch(r"\n\[… \d{1,20} characters omitted …\]\n", text[half:-half]):
+        return text  # Already capped: completion and transcript must show exactly the same text.
+    total = len(text) if total is None else total
+    if total <= MAX_TOOL_OUTPUT:
+        return text
+    return text[:half] + "\n[… %d characters omitted …]\n" % (total - MAX_TOOL_OUTPUT) + text[-half:]
+
+
+STALE_AFTER = 15  # seconds a new turn may take to show as active before "idle" means it died
+MAX_BODY = 16_000_000  # a few phone photos as data URLs
 PLACEHOLDER_TITLES = {"", "new conversation", "new chat", "mobile"}
 DECISIONS = {"once": "accept", "session": "acceptForSession", "always": "acceptForSession", "deny": "decline"}
 APPROVAL_METHODS = {"item/commandExecution/requestApproval", "item/fileChange/requestApproval",
@@ -46,11 +71,16 @@ class RpcError(Exception):
     pass
 
 
+class RpcUnavailable(RpcError):
+    pass
+
+
 class Rpc:
     """One JSON-RPC connection to the daemon (WebSocket over its unix socket); reconnects on drop."""
 
-    def __init__(self, sock, on_message, on_ready=lambda: None, connect=None):
+    def __init__(self, sock, on_message, on_ready=lambda: None, connect=None, on_lost=lambda: None):
         self.sock, self.on_message, self.on_ready = sock, on_message, on_ready
+        self.on_lost = on_lost
         self.connect = connect or self._unix_connect
         self.lock, self.send_lock = threading.Lock(), threading.Lock()
         self.pending, self.next_id, self.ws = {}, 0, None
@@ -65,29 +95,50 @@ class Rpc:
                             ping_interval=None)
 
     def _loop(self):
+        attempt, delay, offline = 0, 2, False
         while True:
+            attempt += 1
+            ws = None
             try:
                 ws = self.connect()
                 ws.send(json.dumps({"id": "init", "method": "initialize", "params": {
                     "clientInfo": {"name": "hermes-companion", "title": "Hermes Companion", "version": "1"},
                     "capabilities": {"experimentalApi": True}}}))
-                while json.loads(ws.recv()).get("id") != "init":
+                while json.loads(ws.recv(timeout=15)).get("id") != "init":
                     pass
                 ws.send(json.dumps({"method": "initialized"}))
                 self.ws = ws
                 self.ready.set()
+                if offline:
+                    logger.warning("Codex daemon connection restored (attempt %d, reconnect delay %ds)", attempt, delay)
+                offline, attempt = False, 0
                 threading.Thread(target=self.on_ready, daemon=True).start()
                 while True:
                     self._dispatch(json.loads(ws.recv()))
-            except Exception:
-                pass
-            self.ready.clear()
+            except Exception as exc:
+                self.ready.clear()
+                self.ws = None
+                if not offline:
+                    logger.warning("Codex daemon connection lost (%s); reconnect in %ds (attempt %d)",
+                                   type(exc).__name__, delay, attempt + 1)
+                    offline = True
+                    try:
+                        self.on_lost()
+                    except Exception as callback_exc:
+                        log_failure("Codex disconnect callback failed", callback_exc)
+                else:
+                    log_failure("Codex reconnect attempt %d failed" % attempt, exc, logging.DEBUG)
+            try:
+                if ws is not None:
+                    ws.close()  # a parse error or stalled handshake leaves the socket open otherwise
+            except Exception as exc:
+                log_failure("Codex socket cleanup failed", exc, logging.DEBUG)
             with self.lock:
                 failed, self.pending = self.pending, {}
             for slot in failed.values():
                 slot[1] = {"error": {"message": "Codex daemon connection lost"}}
                 slot[0].set()
-            time.sleep(2)
+            time.sleep(delay)
 
     def _dispatch(self, msg):
         if "method" not in msg:
@@ -99,23 +150,29 @@ class Rpc:
             return
         try:
             self.on_message(msg)
-        except Exception:
-            pass  # One bad notification must not drop the connection.
+        except Exception as exc:
+            log_failure("Codex notification handler failed", exc)  # Do not drop the connection.
 
     def send(self, msg):
         with self.send_lock:
             self.ws.send(json.dumps(msg))
 
     def call(self, method, params, timeout=20):  # under the app's 30 s read timeout: an error, not a hang
-        if not self.ready.wait(15):
-            raise RpcError("Codex daemon is not running (codex app-server daemon start)")
+        start = time.time()
+        if not self.ready.wait(min(3, timeout)):  # rides out startup and a quick reconnect, then fails fast
+            raise RpcUnavailable(OFFLINE_HINT)
         slot = [threading.Event(), None]
         with self.lock:
             self.next_id += 1
             rid = self.next_id
             self.pending[rid] = slot
-        self.send({"id": rid, "method": method, "params": params})
-        if not slot[0].wait(timeout):
+        try:
+            self.send({"id": rid, "method": method, "params": params})
+        except Exception:  # the socket died between ready and send: an error, not a leaked slot and a 500
+            with self.lock:
+                self.pending.pop(rid, None)
+            raise RpcError("Codex daemon connection lost")
+        if not slot[0].wait(max(1, timeout - (time.time() - start))):
             with self.lock:
                 self.pending.pop(rid, None)
             raise RpcError(method + " timed out")
@@ -126,6 +183,36 @@ class Rpc:
     def respond(self, rid, result):
         self.send({"id": rid, "result": result})
 
+    def respond_error(self, rid, message):
+        self.send({"id": rid, "error": {"code": -32601, "message": message}})
+
+
+def question_text(question):
+    """Keep choice labels intact for answers; include their descriptions in the card text."""
+    text = question.get("question")
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("question text required")
+    options = question.get("options")
+    if options is None:
+        options = []
+    if not isinstance(options, list):
+        raise ValueError("invalid question options")
+    choices, descriptions = [], []
+    for option in options:
+        if not isinstance(option, dict) or not isinstance(option.get("label"), str) or not option["label"].strip():
+            raise ValueError("option label required")
+        if option["label"] in choices:
+            raise ValueError("unique option labels required")
+        choices.append(option["label"])
+        if option.get("description"):
+            descriptions.append(option["label"] + ": " + str(option["description"]))
+    return text + ("\n\n" + "\n".join(descriptions) if descriptions else ""), choices
+
+
+def validate_answer(request_id, answer):
+    if not isinstance(request_id, str) or not request_id.strip() or not isinstance(answer, str) or not answer.strip():
+        raise ValueError("request_id and answer are required")
+
 
 class Run:
     """One Codex turn as a Hermes run: an append-only event log the phone replays by seq."""
@@ -133,10 +220,13 @@ class Run:
     def __init__(self, run_id, thread_id):
         self.id, self.thread_id = run_id, thread_id
         self.user_text, self.last_text, self.output, self.error = "", "", "", ""
-        self.status, self.finished_at = "running", 0.0
-        self.events, self.items, self.approvals = [], {}, {}
+        self.status, self.finished_at, self.started_at = "running", 0.0, time.time()
+        self.error_hint = ""
+        self.events, self.items, self.approvals, self.questions = [], {}, {}, {}
         self.message_text, self.last_message_id, self.steered = {}, None, set()
         self.cond = threading.Condition()
+        self.output_pending, self.output_totals, self.output_sent = {}, {}, {}
+        self.output_timer = None
 
     def emit(self, name, **data):
         with self.cond:
@@ -144,14 +234,78 @@ class Run:
             self.events.append(data)
             self.cond.notify_all()
 
+    def tool_delta(self, item_id, delta, tool_name="terminal"):
+        with self.cond:
+            if self.status != "running" or not delta:
+                return
+            item = self.items.setdefault(item_id, {"id": item_id, "type": "fileChange" if tool_name == "patch" else "commandExecution"})
+            # Keep raw head and tail separately from the rendered omission marker.
+            old, total = self.output_totals.get(item_id, (item.get("aggregatedOutput", ""),
+                                                       len(item.get("aggregatedOutput", ""))))
+            total += len(delta)
+            raw = old + delta
+            if len(raw) > MAX_TOOL_OUTPUT:
+                raw = raw[:MAX_TOOL_OUTPUT // 2] + raw[-MAX_TOOL_OUTPUT // 2:]
+            self.output_totals[item_id] = (raw, total)
+            item["aggregatedOutput"] = capped_output(raw, total)
+            if self.output_sent.get(item_id, 0) >= MAX_TOOL_OUTPUT:
+                return
+            pending, count, _ = self.output_pending.get(item_id, ("", 0, tool_name))
+            pending += delta
+            count += len(delta)
+            if len(pending) > MAX_TOOL_OUTPUT:
+                pending = pending[:MAX_TOOL_OUTPUT // 2] + pending[-MAX_TOOL_OUTPUT // 2:]
+            self.output_pending[item_id] = (pending, count, tool_name)
+            if self.output_timer is None:
+                self.output_timer = threading.Timer(OUTPUT_INTERVAL, self.flush_output)
+                self.output_timer.daemon = True
+                self.output_timer.start()
+
+    def flush_output(self):
+        with self.cond:
+            if self.output_timer is not None:
+                self.output_timer.cancel()
+                self.output_timer = None
+            pending, self.output_pending = self.output_pending, {}
+            for item_id, (text, count, tool_name) in pending.items():
+                sent = self.output_sent.get(item_id, 0)
+                if sent >= MAX_TOOL_OUTPUT:
+                    continue
+                # Bound the immutable replay log too. Completion replaces this preview with the final head/tail.
+                preview = capped_output(text, count) if not sent else text[:MAX_TOOL_OUTPUT - sent]
+                self.output_sent[item_id] = sent + len(preview)
+                self.emit("tool.output", tool_name=tool_name, item_id=item_id, preview=preview)
+
     def finish(self, status, error=""):
         with self.cond:
             if self.status != "running":
                 return
-            self.output, self.error = self.last_text, error
-            self.emit("run." + status, output=self.output, error=error, session_id=self.thread_id)
+            self.flush_output()
+            # Interrupted turns may omit item/completed. Still replace streamed output with the retained head/tail.
+            for item_id, (_, total) in self.output_totals.items():
+                item = self.items.get(item_id, {})
+                if total:
+                    tool = tool_of(item)
+                    if tool:
+                        name, _, result, _, preview = tool
+                        self.emit("tool.completed" if status == "completed" else "tool.failed",
+                                  tool_name=name, item_id=item_id,
+                                  preview=result.get("output") or result.get("diff") or preview)
+            self.output_totals.clear()
+            self.output, self.error = self.last_text, error or (self.error_hint if status == "failed" else "")
+            for rid in list(self.approvals):  # a card for a turn that has ended could only fail when tapped
+                self.approvals.pop(rid, None)
+                self.emit("approval.resolved", request_id=rid)
+            self.withdraw_questions()
+            self.emit("run." + status, output=self.output, error=self.error, session_id=self.thread_id)
             self.status, self.finished_at = status, time.time()
             self.cond.notify_all()
+
+    def withdraw_questions(self):
+        with self.cond:
+            for qid in list(self.questions):
+                self.questions.pop(qid, None)
+                self.emit("clarify.resolved", request_id=qid)
 
     def steer(self, text):
         """Announce a steer once, whether the phone sent it or its item arrived from the daemon."""
@@ -180,11 +334,15 @@ def _rid(*parts):
     return int(hashlib.sha1("|".join(parts).encode()).hexdigest()[:13], 16)
 
 
-def _text(content):
-    text = "\n".join(c.get("text", "") for c in content or [] if c.get("type") == "text")
-    if text.startswith(CONTEXT_OPEN) and CONTEXT_CLOSE in text:  # the phone's per-turn context is not part of the message
-        text = text.split(CONTEXT_CLOSE, 1)[1].lstrip("\n")
+def _uncontext(text):
+    """The phone's per-turn context block is not part of the message (nor of a thread's title or preview)."""
+    if text.startswith(CONTEXT_OPEN):
+        text = text.split(CONTEXT_CLOSE, 1)[1].lstrip("\n") if CONTEXT_CLOSE in text else ""
     return text
+
+
+def _text(content):
+    return _uncontext("\n".join(c.get("text", "") for c in content or [] if c.get("type") == "text"))
 
 
 def _content(content):
@@ -225,6 +383,21 @@ def turn_input(value, instructions=""):
     return [{"type": "text", "text": sent, "text_elements": []}] + items, message
 
 
+ERRORS = {"usageLimitExceeded": "Codex usage limit reached. Try again when the limit resets.",
+          "unauthorized": "Codex is not signed in or the sign-in expired. Run codex login on the host.",
+          "modelNotFound": "The selected model is not available to this Codex account.",
+          "contextWindowExceeded": "The conversation is too long for the model. Use /compact and try again.",
+          "rateLimitExceeded": "Codex is rate limited. Wait a moment and try again.",
+          "serverOverloaded": "Codex servers are overloaded. Try again shortly."}
+
+
+def _turn_error(err):
+    """A readable message for a Codex TurnError: its own text, else one chosen by its error class."""
+    err = err or {}
+    info = err.get("codexErrorInfo")
+    return err.get("message") or ERRORS.get(info if isinstance(info, str) else "", "") or "Codex stopped with an error"
+
+
 def _tail(text, n=4000):
     text = text or ""
     return text if len(text) <= n else "…" + text[-n:]
@@ -248,12 +421,12 @@ def tool_of(item):
     if kind == "commandExecution":
         cmd, code = _command(item.get("command")), item.get("exitCode")
         return ("terminal", {"command": cmd, "cwd": item.get("cwd")},
-                {"output": _tail(item.get("aggregatedOutput")), "exit_code": code, "status": status},
+                {"output": capped_output(item.get("aggregatedOutput") or ""), "exit_code": code, "status": status},
                 failed or bool(code), cmd.splitlines()[0][:120] if cmd else "")
     if kind == "fileChange":
         changes = item.get("changes") or []
         files = [c.get("path", "") for c in changes]
-        return ("patch", {"files": files}, {"diff": _tail("\n".join(c.get("diff", "") for c in changes)), "status": status},
+        return ("patch", {"files": files}, {"diff": capped_output("\n".join(c.get("diff", "") for c in changes)), "status": status},
                 failed, ", ".join(Path(f).name for f in files)[:120])
     if kind == "mcpToolCall":
         result = {"error": item["error"]} if item.get("error") else {"result": item.get("result")}
@@ -306,14 +479,21 @@ class Bridge:
         self.token, self.cwd, self.state_path = token, str(cwd), Path(state_path)
         self.runs, self.by_thread, self.subscribed = {}, {}, set()
         self.runtime = {}
+        self.daemon_offline = False
         self.lock = threading.RLock()
+        self.usage_lock = threading.Lock()
+        self.limits, self.limits_at, self.costs = {}, 0, {}
         try:
             self.state = json.loads(self.state_path.read_text())
-        except Exception:
+        except FileNotFoundError as exc:
+            log_failure("Codex bridge state does not exist yet", exc, logging.DEBUG)
             self.state = {}
-        for key in ("pinned", "unread", "model", "settings"):
+        except Exception as exc:
+            log_failure("Could not read Codex bridge state", exc)
+            self.state = {}
+        for key in ("pinned", "unread", "model", "settings", "usage"):
             self.state.setdefault(key, {})
-        self.rpc = Rpc(sock, self.on_message, self.on_ready, connect)
+        self.rpc = Rpc(sock, self.on_message, self.on_ready, connect, self.on_lost)
 
     def save(self):
         with self.lock:
@@ -331,9 +511,13 @@ class Bridge:
             if run is None and create and thread_id and turn_id:
                 run = self.runs[turn_id] = Run(turn_id, thread_id)
                 self.by_thread[thread_id] = run
+                if self.daemon_offline:
+                    run.emit("assistant.commentary", text=OFFLINE_HINT)
                 cutoff = time.time() - 3600
                 for rid in [r.id for r in self.runs.values() if r.finished_at and r.finished_at < cutoff]:
                     self.runs.pop(rid, None)
+                for tid in [t for t, r in self.by_thread.items() if r.id not in self.runs]:
+                    self.by_thread.pop(tid, None)  # one run per thread would otherwise live forever
             return run
 
     def on_message(self, msg):
@@ -341,18 +525,60 @@ class Bridge:
         thread_id = p.get("threadId")
         turn_id = p.get("turnId") or (p.get("turn") or {}).get("id")
         if "id" in msg:  # a server request: the daemon waits for an answer
-            if method in APPROVAL_METHODS:
-                self.on_approval(msg["id"], method, p, self.run_for(thread_id, turn_id))
+            run = self.run_for(thread_id, turn_id) if method in APPROVAL_METHODS or method == "item/tool/requestUserInput" else None
+            if run and run.status == "running" and method == "item/tool/requestUserInput":
+                try:
+                    self.on_question(msg["id"], p, run)
+                except (ValueError, TypeError, KeyError):
+                    self.rpc.respond_error(msg["id"], "Invalid or unsupported user input questions")
+            elif run and run.status == "running":
+                self.on_approval(msg["id"], method, p, run)
+            else:  # questions, elicitations, tool calls: unanswered, the turn would hang for good
+                self.rpc.respond_error(msg["id"], "The Companion app cannot answer " + method)
+            return
+        # These sources need no turn id. Never make RPC calls from this reader callback.
+        if method == "account/rateLimits/updated":
+            self.update_limits(p, sparse=True)
+            with self.lock:
+                runs = [r for r in self.runs.values() if r.status == "running"]
+                data = self.limit_usage()
+            for run in runs:
+                run.emit("usage.updated", as_of=int(time.time()), **data)
+            return
+        if method in ("thread/tokenUsage/updated", "thread/compacted") and thread_id:
+            with self.lock:
+                if method == "thread/tokenUsage/updated":
+                    self.state["usage"][thread_id] = {**p["tokenUsage"], "source": "live", "as_of": int(time.time())}
+                elif thread_id in self.state["usage"]:
+                    self.state["usage"][thread_id].update(source="estimate", as_of=int(time.time()))
+                self.save()
+                run = self.run_for(thread_id, turn_id) if turn_id else self.by_thread.get(thread_id)
+                if run and run.status == "running":
+                    run.emit("usage.updated", **self.cached_usage(thread_id))
             return
         if method == "serverRequest/resolved":
             run = self.by_thread.get(thread_id)
             if run and run.approvals.pop(str(p.get("requestId")), None) is not None:
                 run.emit("approval.resolved", request_id=str(p.get("requestId")))
+            if run:
+                with run.cond:
+                    for qid, pending in list(run.questions.items()):
+                        if str(pending["rpc_id"]) == str(p.get("requestId")):
+                            run.questions.pop(qid)
+                            run.emit("clarify.resolved", request_id=qid)
+            return
+        if method == "thread/status/changed" and (p.get("status") or {}).get("type") != "active":
+            run = self.by_thread.get(thread_id)
+            if run and run.status == "running":  # settle calls the daemon: never from the reader thread
+                threading.Thread(target=self.settle, args=(run,), daemon=True).start()
             return
         if not turn_id:
             return
         run = self.run_for(thread_id, turn_id)
-        if method == "turn/started":
+        if method == "error":
+            if not p.get("willRetry"):
+                run.error_hint = _turn_error(p.get("error"))
+        elif method == "turn/started":
             run.emit("run.started")
         elif method == "item/started":
             self.on_item(run, p["item"], started=True)
@@ -360,17 +586,35 @@ class Bridge:
             self.on_item(run, p["item"], started=False)
         elif method == "item/agentMessage/delta":
             run.message(p.get("itemId"), p.get("delta", ""))
-        elif method == "item/commandExecution/outputDelta":
-            run.emit("tool.output", tool_name="terminal", preview=p.get("delta", ""))
+        elif method in ("item/commandExecution/outputDelta", "item/fileChange/outputDelta"):
+            run.tool_delta(p.get("itemId"), p.get("delta", ""),
+                           "patch" if method == "item/fileChange/outputDelta" else "terminal")
         elif method in ("item/reasoning/summaryTextDelta", "item/reasoning/textDelta"):
             run.emit("reasoning.available", text=p.get("delta", ""))
         elif method == "turn/completed":
             turn = p.get("turn") or {}
             status = {"completed": "completed", "interrupted": "cancelled"}.get(turn.get("status"), "failed")
-            run.finish(status, ((turn.get("error") or {}).get("message") or "") if status == "failed" else "")
+            if status == "failed" and (turn.get("error") or not run.error_hint):
+                run.finish(status, _turn_error(turn.get("error")))
+            else:
+                run.finish(status)
 
     def on_item(self, run, item, started):
         kind = item.get("type")
+        item = dict(item)
+        if kind in ("commandExecution", "fileChange"):
+            with run.cond:
+                if not started:
+                    run.flush_output()
+                previous = run.items.get(item.get("id"), {})
+                output = item.get("aggregatedOutput") or previous.get("aggregatedOutput") or ""
+                item["aggregatedOutput"] = capped_output(output)
+                if started and item.get("id") not in run.output_totals:
+                    half = MAX_TOOL_OUTPUT // 2
+                    raw = output if len(output) <= MAX_TOOL_OUTPUT else output[:half] + output[-half:]
+                    run.output_totals[item.get("id")] = (raw, len(output))
+                if not started:
+                    run.output_totals.pop(item.get("id"), None)
         run.items[item.get("id")] = item
         if kind == "userMessage":
             text = _text(item.get("content"))
@@ -385,8 +629,8 @@ class Bridge:
             if tool:
                 name, args, result, failed, preview = tool
                 state = "started" if started else "failed" if failed else "completed"
-                run.emit("tool." + state, tool_name=name, args=args, preview=preview if started else
-                         _tail(result.get("output") or result.get("diff") or "", 300) or preview)
+                run.emit("tool." + state, tool_name=name, item_id=item.get("id"), args=args, preview=preview if started else
+                         result.get("output") or result.get("diff") or preview)
 
     def on_approval(self, rpc_id, method, p, run):
         if run is None:
@@ -407,20 +651,103 @@ class Bridge:
         run.emit("approval.request", request_id=rid, command=command, description=description,
                  choices=["once", "session", "deny"])
 
+    def on_lost(self):
+        with self.lock:
+            self.daemon_offline = True
+            for run in self.runs.values():
+                if run.status == "running":
+                    run.flush_output()
+                    run.emit("assistant.commentary", text=OFFLINE_HINT)
+
     def on_ready(self):
         """After a (re)connect: subscribe again to threads with live runs and settle any that ended meanwhile."""
         with self.lock:
+            # A queued ready callback may run after the reader already detected another disconnect.
+            if getattr(self, "rpc", None) is not None and not self.rpc.ready.is_set():
+                return
+            self.daemon_offline = False
             self.subscribed.clear()
             live = [r for r in self.runs.values() if r.status == "running"]
         for run in live:
+            run.withdraw_questions()
+            for rid in list(run.approvals):  # answers belong to the old connection; the daemon asks again if it still waits
+                run.approvals.pop(rid, None)
+                run.emit("approval.resolved", request_id=rid)
             try:
                 self.subscribe(run.thread_id)
-                turns = self.rpc.call("thread/turns/list", {"threadId": run.thread_id, "limit": 10})["data"]
-                status = next((t["status"] for t in turns if t["id"] == run.id), "completed")
-                if status != "inProgress":
-                    run.finish({"completed": "completed", "interrupted": "cancelled"}.get(status, "failed"))
-            except Exception:
-                pass
+            except Exception as exc:
+                log_failure("Could not resubscribe Codex run after reconnect", exc)
+                # The thread may be gone after a restart: settle still has to end the run.
+            self.settle(run)
+
+    def on_question(self, rpc_id, params, run):
+        questions = params.get("questions")
+        if not isinstance(questions, list) or not questions:
+            raise ValueError("questions required")
+        ids = set()
+        for question in questions:
+            # The phone's clarify card has no masked input for secret questions.
+            if not isinstance(question, dict) or question.get("isSecret"):
+                raise ValueError("unsupported question")
+            qid = question.get("id")
+            if not isinstance(qid, str) or not qid or qid in ids:
+                raise ValueError("unique question ids required")
+            ids.add(qid)
+            question_text(question)  # validate the entire batch before showing its first card
+        with run.cond:
+            if run.status != "running":
+                raise ValueError("run finished")
+            self.show_question(run, {"rpc_id": rpc_id, "remaining": list(questions), "answers": {}})
+
+    def show_question(self, run, pending):
+        question = pending["remaining"][0]
+        qid = str(uuid.uuid4())
+        run.questions[qid] = pending
+        text, choices = question_text(question)
+        run.emit("clarify.request", prompt_id=qid, question=text, choices=choices, multi_select=False)
+
+    def clarify(self, run, request_id, answer):
+        with run.cond:
+            if run.status != "running":
+                raise RuntimeError("run already finished")
+            validate_answer(request_id, answer)
+            pending = run.questions.get(request_id)
+            if pending is None:
+                raise KeyError("no pending question")
+            question = pending["remaining"][0]
+            answers = {**pending["answers"], question["id"]: {"answers": [answer.strip()]}}
+            if len(pending["remaining"]) == 1:
+                # app-server 0.165.0 ToolRequestUserInputResponse: question id -> {answers: string[]}.
+                try:
+                    self.rpc.respond(pending["rpc_id"], {"answers": answers})
+                except Exception:
+                    raise RpcError("Codex daemon connection lost; try again")
+            run.questions.pop(request_id)
+            run.emit("clarify.resolved", request_id=request_id)
+            if len(pending["remaining"]) > 1:
+                pending["answers"] = answers
+                pending["remaining"] = pending["remaining"][1:]
+                self.show_question(run, pending)
+
+    def settle(self, run, idle=None):
+        """Finish a run whose turn ended without a turn/completed reaching us (interrupted, or missed while away).
+
+        A turn the rollout still lists as inProgress while the thread is not active died with its daemon."""
+        try:
+            turns = self.rpc.call("thread/turns/list", {"threadId": run.thread_id, "limit": 10})["data"]
+            turn = next((t for t in turns if t["id"] == run.id), {"status": "completed"})
+            if turn["status"] == "inProgress" and time.time() - run.started_at > STALE_AFTER:
+                if idle is None:
+                    idle = (self.rpc.call("thread/read", {"threadId": run.thread_id, "includeTurns": False})["thread"]
+                            .get("status") or {}).get("type") != "active"
+                if idle:
+                    turn = {"status": "failed", "error": {"message": "Codex stopped before this turn finished"}}
+        except Exception as exc:
+            log_failure("Could not settle Codex run", exc)
+            return
+        if turn["status"] != "inProgress":
+            status = {"completed": "completed", "interrupted": "cancelled"}.get(turn["status"], "failed")
+            run.finish(status, _turn_error(turn.get("error")) if status == "failed" and (turn.get("error") or not run.error_hint) else "")
 
     # ── sessions ───────────────────────────────────────────────────────────────────────────────
 
@@ -429,17 +756,22 @@ class Bridge:
             self.runtime[thread_id] = self.rpc.call("thread/resume", {"threadId": thread_id, "excludeTurns": True})
             self.subscribed.add(thread_id)
 
-    def session(self, t):
+    def session(self, t, archived=False):
         tid = t["id"]
         run = self.by_thread.get(tid)
         live = run is not None and run.status == "running"
+        if live and (t.get("status") or {}).get("type") != "active":
+            # Codex says nothing is running here: a stale run would make every phone that opens the chat follow it again.
+            self.settle(run, idle=True)
+            live = run.status == "running"
         override = self.state["model"].get(tid, "")
-        title = t.get("name") or (t.get("preview") or "").strip().split("\n")[0][:60]
+        preview = _uncontext((t.get("preview") or "").strip())
+        title = t.get("name") or preview.strip().split("\n")[0][:60]
         return {"id": tid, "title": title, "source": "codex", "model": override or t.get("model") or "",
-                "has_model_config": bool(override), "preview": (t.get("preview") or "")[:160],
+                "has_model_config": bool(override), "preview": preview[:160],
                 "message_count": 0, "tool_call_count": 0, "last_active": t.get("updatedAt") or t.get("createdAt") or 0,
                 "pinned": bool(self.state["pinned"].get(tid)), "unread": bool(self.state["unread"].get(tid)),
-                "archived": False, "cwd": t.get("cwd") or "", "status": (t.get("status") or {}).get("type", ""),
+                "archived": archived, "cwd": t.get("cwd") or "", "status": (t.get("status") or {}).get("type", ""),
                 "active_run_id": run.id if live else "", "active_run_input": run.user_text if live else ""}
 
     def attach(self, t):
@@ -500,7 +832,13 @@ class Bridge:
                 if flag in body:
                     self.state[flag][tid] = bool(body[flag])
                     self.save()
-        return self.session(self.thread(tid))
+        try:
+            return self.session(self.thread(tid), archived=body.get("archived") is True)
+        except RpcError as exc:
+            if body.get("archived") is not True:
+                raise
+            log_failure("Archived Codex thread is unreadable", exc, logging.DEBUG)
+            return self.session({"id": tid}, archived=True)  # archived threads may not be readable; the archive worked
 
     def turns(self, params):
         """thread/turns/list, with a new thread that has no user message yet read as having no turns (Codex errors instead)."""
@@ -508,6 +846,7 @@ class Bridge:
             return self.rpc.call("thread/turns/list", params)
         except RpcError as exc:
             if "not materialized" in str(exc):
+                log_failure("New Codex thread has no turns yet", exc, logging.DEBUG)
                 return {"data": []}
             raise
 
@@ -538,10 +877,131 @@ class Bridge:
             # A new thread has no rollout until its first message. thread/start already gave its settings.
             if "no rollout found" not in str(exc) or tid not in self.runtime:
                 raise
+            log_failure("New Codex thread has no rollout yet", exc, logging.DEBUG)
             runtime = self.runtime[tid]
         self.runtime[tid] = runtime
         self.subscribed.add(tid)
         return runtime
+
+    # ── usage ──────────────────────────────────────────────────────────────────────────────────
+
+    def update_limits(self, response, sparse=False):
+        with self.lock:
+            if sparse:
+                snapshot = response.get("rateLimits") or {}
+                old = self.limits.get("rateLimits") or {}
+                limit_id = snapshot.get("limitId") or old.get("limitId") or "codex"
+                buckets = dict(self.limits.get("rateLimitsByLimitId") or {})
+                if not buckets and old:
+                    buckets[old.get("limitId") or "codex"] = old
+                old = buckets.get(limit_id, old if (old.get("limitId") or "codex") == limit_id else {})
+                merged = {**old, **{k: v for k, v in snapshot.items() if v is not None}}
+                for key in ("primary", "secondary"):
+                    if snapshot.get(key) is not None:
+                        merged[key] = {**(old.get(key) or {}),
+                                       **{k: v for k, v in snapshot[key].items() if v is not None}}
+                buckets[limit_id] = merged
+                self.limits = {**self.limits, "rateLimits": merged, "rateLimitsByLimitId": buckets}
+            else:
+                self.limits = response
+                self.limits_at = time.monotonic()
+
+    def limit_usage(self):
+        buckets = self.limits.get("rateLimitsByLimitId") or {}
+        if not buckets and self.limits.get("rateLimits"):
+            snapshot = self.limits["rateLimits"]
+            buckets = {snapshot.get("limitId") or "codex": snapshot}
+        data, limits = {}, []
+        for limit_id, snapshot in buckets.items():
+            if snapshot.get("planType") and "plan" not in data:
+                data["plan"] = snapshot["planType"]
+            for key in ("primary", "secondary"):
+                window = snapshot.get(key) or {}
+                if window.get("usedPercent") is None:
+                    continue
+                minutes = window.get("windowDurationMins")
+                label = "%g-hour limit" % (minutes / 60) if minutes else "Usage limit"
+                if minutes == 10080:
+                    label = "Weekly limit"
+                if len(buckets) > 1:
+                    label = (snapshot.get("limitName") or limit_id) + " · " + label
+                row = {"id": limit_id + ":" + key, "label": label,
+                       "used_percent": max(0, min(100, window["usedPercent"]))}
+                if window.get("resetsAt") is not None:
+                    row["resets_at"] = window["resetsAt"]
+                limits.append(row)
+        if buckets:
+            data["limits"] = limits
+        available = (self.limits.get("rateLimitResetCredits") or {}).get("availableCount", 0)
+        if available > 0:
+            data["resets"] = {"available": available, "label": "Use a limit reset"}
+        return data
+
+    def cached_usage(self, tid):
+        """Only local state: safe to call from the RPC reader when emitting a notification."""
+        with self.lock:
+            usage = self.state["usage"].get(tid, {})
+            data = {"as_of": usage.get("as_of", int(time.time())), **self.limit_usage()}
+            last, total = usage.get("last") or {}, usage.get("total") or {}
+            if last.get("totalTokens") is not None and usage.get("modelContextWindow"):
+                used, window = last["totalTokens"], usage["modelContextWindow"]
+                run = self.by_thread.get(tid)
+                source = "live" if run and run.status == "running" else "last_turn"
+                if usage.get("source") == "estimate":
+                    source = "estimate"
+                data["context"] = {"used_tokens": used, "window_tokens": window,
+                                   "percent": max(0, min(100, used * 100 / window)), "source": source}
+            session = {wire: total[native] for native, wire in (
+                ("inputTokens", "input_tokens"), ("outputTokens", "output_tokens"),
+                ("cachedInputTokens", "cached_input_tokens"), ("reasoningOutputTokens", "reasoning_tokens"))
+                if total.get(native) is not None}
+            cached_cost = self.costs.get(tid)
+            if cached_cost and cached_cost[1] is not None:
+                session["cost_usd"] = cached_cost[1]
+            if session:
+                data["session"] = session
+            return data
+
+    def usage(self, tid, refresh=False):
+        self.rpc.call("thread/read", {"threadId": tid, "includeTurns": False}, timeout=5)
+        # Serialize optional probes; failures are cached too, so unsupported sources cannot be hammered.
+        with self.usage_lock:
+            if refresh or time.monotonic() - self.limits_at >= 60:
+                try:
+                    self.update_limits(self.rpc.call("account/rateLimits/read", {}, timeout=5))
+                except RpcError as exc:
+                    log_failure("Optional Codex rate limit read unavailable", exc, logging.DEBUG)
+                    with self.lock:
+                        # A rolling update is still usable when the optional full read is unavailable.
+                        self.limits_at = time.monotonic()
+            cached_cost = self.costs.get(tid)
+            if refresh or not cached_cost or time.monotonic() - cached_cost[0] >= 60:
+                cost = None
+                try:
+                    micros = (self.rpc.call("account/usage/read", {"threadId": tid}, timeout=5).get("threadUsage") or {}).get("estimatedUsageUsdMicros")
+                    if micros is not None:
+                        cost = micros / 1_000_000
+                except RpcError as exc:
+                    log_failure("Optional Codex usage read unavailable", exc, logging.DEBUG)
+                with self.lock:
+                    self.costs[tid] = (time.monotonic(), cost)
+            return self.cached_usage(tid)
+
+    def reset_usage(self, tid, body):
+        if set(body) - {"credit_id"} or ("credit_id" in body and
+                (not isinstance(body["credit_id"], str) or not body["credit_id"].strip())):
+            raise ValueError("credit_id must be a non-empty string")
+        self.rpc.call("thread/read", {"threadId": tid, "includeTurns": False}, timeout=5)
+        params = {"idempotencyKey": str(uuid.uuid4())}
+        if "credit_id" in body:
+            params["creditId"] = body["credit_id"]
+        outcome = self.rpc.call("account/rateLimitResetCredit/consume", params, timeout=10).get("outcome")
+        messages = {"reset": "Usage limits reset.", "alreadyRedeemed": "Usage limits already reset.",
+                    "nothingToReset": "No usage limit is eligible for a reset.", "noCredit": "No limit resets available."}
+        if outcome not in messages:
+            raise RpcError("Codex returned an unknown reset outcome")
+        return {"ok": outcome in ("reset", "alreadyRedeemed"), "message": messages[outcome],
+                "usage": self.usage(tid, refresh=True)}
 
     def settings(self, tid, changes=None):
         """Read effective daemon settings; save explicit overrides only for future phone turns."""
@@ -554,6 +1014,8 @@ class Bridge:
         efforts = [{"value": e["reasoningEffort"], "label": e["reasoningEffort"].capitalize(),
                     "description": e.get("description", "")}
                    for e in model.get("supportedReasoningEfforts", [])]
+        fast_options = [{"value": tier["id"], "label": tier["name"], "description": tier.get("description", "")}
+                        for tier in model.get("serviceTiers") or []]
         requirements = self.rpc.call("configRequirements/read", {}).get("requirements") or {}
         permission_options = []
         for value, (label, description, sandbox, policy) in PERMISSIONS.items():
@@ -567,9 +1029,14 @@ class Bridge:
         with self.lock:
             saved = dict(self.state["settings"].get(tid, {}))
             if changes is not None:
-                if not changes or set(changes) - {"reasoning_effort", "permission_mode"}:
-                    raise ValueError("reasoning_effort or permission_mode required")
-                for key, options in (("reasoning_effort", efforts), ("permission_mode", permission_options)):
+                if not changes or set(changes) - {"reasoning_effort", "permission_mode", "plan_mode", "fast_mode"}:
+                    raise ValueError("reasoning_effort, permission_mode, plan_mode or fast_mode required")
+                if "plan_mode" in changes:
+                    if not isinstance(changes["plan_mode"], bool):
+                        raise ValueError("plan_mode must be a boolean")
+                    saved["plan_mode"] = changes["plan_mode"]
+                for key, options in (("reasoning_effort", efforts), ("permission_mode", permission_options),
+                                     ("fast_mode", fast_options)):
                     if key in changes:
                         if key == "permission_mode" and changes[key] == "custom" and not saved.get(key):
                             continue  # Selecting the current policy is a no-op, never a new grant.
@@ -597,13 +1064,26 @@ class Bridge:
         elif permission == "custom":
             permission_options.insert(0, {"value": "custom", "label": "Current server permissions",
                                          "description": "Keep the agent's existing sandbox and approval policy."})
-        return {"reasoning_effort": effort, "reasoning_options": efforts, "permission_mode": permission,
+        result = {"reasoning_effort": effort, "reasoning_options": efforts, "permission_mode": permission,
                 "permission_options": permission_options, "sandbox": sandbox, "approval_policy": policy,
+                "plan_mode": saved.get("plan_mode", (runtime.get("collaborationMode") or {}).get("mode") == "plan"),
+                "applies": "next_turn",
                 "scope": "Changes apply to your next message in this conversation."}
+        if fast_options:
+            values = [o["value"] for o in fast_options]
+            current = saved.get("fast_mode", runtime.get("serviceTier"))
+            default = model.get("defaultServiceTier")
+            if current not in values:
+                current = default if default in values else values[0]
+            result.update(fast_options=fast_options,
+                          fast_mode=current)
+        return result
 
     # ── runs ───────────────────────────────────────────────────────────────────────────────────
 
     def start(self, tid, value, instructions=""):
+        if not self.rpc.ready.wait(3):
+            raise RpcUnavailable(OFFLINE_HINT)
         self.subscribe(tid)
         items, text = turn_input(value, instructions)
         params = {"threadId": tid, "input": items}
@@ -611,14 +1091,22 @@ class Bridge:
             params["model"] = self.state["model"][tid]
         with self.lock:
             settings = dict(self.state["settings"].get(tid, {}))
+        info = self.settings(tid) if "plan_mode" in settings or "fast_mode" in settings else None
         if settings.get("reasoning_effort"):
-            runtime = self.runtime_settings(tid)
             params["effort"] = settings["reasoning_effort"]
+        if settings.get("reasoning_effort") or info:
+            runtime = self.runtime[tid] if info else self.runtime_settings(tid)
             # Collaboration mode takes precedence over the top-level model/effort overrides.
-            if runtime.get("collaborationMode"):
-                mode = runtime["collaborationMode"]
+            if runtime.get("collaborationMode") or "plan_mode" in settings:
+                mode = runtime.get("collaborationMode") or {"mode": "default", "settings": {}}
                 params["collaborationMode"] = {**mode, "settings": {**mode["settings"],
-                    "model": params.get("model") or runtime["model"], "reasoning_effort": params["effort"]}}
+                    "model": params.get("model") or runtime["model"],
+                    "reasoning_effort": params.get("effort") or (info or {}).get("reasoning_effort") or runtime.get("reasoningEffort")}}
+                if "plan_mode" in settings:
+                    params["collaborationMode"]["mode"] = "plan" if settings["plan_mode"] else "default"
+                    params["collaborationMode"]["settings"]["developer_instructions"] = None
+        if "fast_mode" in settings and info.get("fast_options"):
+            params["serviceTier"] = info["fast_mode"]
         if settings.get("permission_mode"):
             _, _, params["sandboxPolicy"], params["approvalPolicy"] = PERMISSIONS[settings["permission_mode"]]
             params["approvalsReviewer"] = "user"
@@ -693,11 +1181,13 @@ class Bridge:
                 window = limits.get(key)
                 if window:
                     lines.append("%s: %s%% used" % (label, window.get("usedPercent")))
-        except RpcError:
-            pass
+        except RpcError as exc:
+            log_failure("Optional Codex rate limit read unavailable", exc, logging.DEBUG)
         return {"type": "output", "output": "\n".join(lines)}
 
     def steer(self, run, text):
+        if run.status != "running":
+            raise ValueError("This run already finished; send it as a new message")
         self.rpc.call("turn/steer", {"threadId": run.thread_id, "expectedTurnId": run.id,
                                      "input": [{"type": "text", "text": text, "text_elements": []}]})
         run.steer(text)
@@ -714,7 +1204,11 @@ class Bridge:
                       "scope": "session" if choice in ("session", "always") else "turn"}
         else:
             result = {"decision": DECISIONS.get(choice, "decline")}
-        self.rpc.respond(rpc_id, result)
+        try:
+            self.rpc.respond(rpc_id, result)
+        except Exception:
+            run.approvals[key] = entry  # the connection dropped: keep the card until the daemon asks again
+            raise RpcError("Codex daemon connection lost; try again")
         run.emit("approval.resolved", request_id=key)
 
 
@@ -740,7 +1234,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def body(self):
         length = int(self.headers.get("Content-Length", "0"))
-        if length < 0 or length > 1_000_000:
+        if length < 0 or length > MAX_BODY:
             raise ValueError("request body too large")
         body = json.loads(self.rfile.read(length) or b"{}")
         if not isinstance(body, dict):
@@ -756,7 +1250,8 @@ class Handler(BaseHTTPRequestHandler):
         self.close_connection = True
         try:
             i = int(self.headers.get("Last-Event-ID", "-1")) + 1
-        except ValueError:
+        except ValueError as exc:
+            log_failure("Invalid Companion replay cursor", exc, logging.DEBUG)
             i = 0
         while True:
             with run.cond:
@@ -790,6 +1285,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, {"session": b.patch(tid, self.body())})
             if not rest and cmd == "DELETE":
                 b.rpc.call("thread/delete", {"threadId": tid})
+                with b.lock:
+                    for table in ("pinned", "unread", "model", "settings", "usage"):
+                        b.state[table].pop(tid, None)
+                    b.costs.pop(tid, None)
+                    b.runtime.pop(tid, None)
+                    b.subscribed.discard(tid)
+                    b.by_thread.pop(tid, None)
+                    b.save()
                 return self.reply(200, {"ok": True})
             if rest == ["messages"] and cmd == "GET":
                 limit, offset = max(1, min(500, int(arg("limit", 120)))), max(0, int(arg("offset", 0)))
@@ -807,11 +1310,17 @@ class Handler(BaseHTTPRequestHandler):
                             settings["reasoning_effort"] = selected["defaultReasoningEffort"]
                         else:
                             settings.pop("reasoning_effort", None)
+                        if not selected or settings.get("fast_mode") not in [t["id"] for t in selected.get("serviceTiers") or []]:
+                            settings.pop("fast_mode", None)
                     b.state["model"][tid] = model
                     b.save()
                 return self.reply(200, {"ok": True})
             if rest == ["settings"] and cmd in ("GET", "POST"):
                 return self.reply(200, b.settings(tid, self.body() if cmd == "POST" else None))
+            if rest == ["usage"] and cmd == "GET":
+                return self.reply(200, b.usage(tid, refresh=arg("refresh", "") == "1"))
+            if rest == ["usage", "reset"] and cmd == "POST":
+                return self.reply(200, b.reset_usage(tid, self.body()))
             if rest == ["command"] and cmd == "POST":
                 return self.reply(200, b.command(tid, str(self.body().get("command") or "")))
         if parts == ["v1", "commands"] and cmd == "GET":
@@ -838,7 +1347,17 @@ class Handler(BaseHTTPRequestHandler):
             if rest == ["events"] and cmd == "GET":
                 return self.events(run)
             if rest == ["stop"] and cmd == "POST":
-                b.rpc.call("turn/interrupt", {"threadId": run.thread_id, "turnId": run.id})
+                failed = None
+                try:
+                    b.rpc.call("turn/interrupt", {"threadId": run.thread_id, "turnId": run.id})
+                except RpcError as exc:
+                    log_failure("Codex interrupt request failed; checking turn status", exc, logging.DEBUG)
+                    failed = exc  # usually the turn already ended; settle tells the phone so
+                b.settle(run)
+                if failed and run.status == "running" and any(w in str(failed) for w in ("lost", "timed out", "not running")):
+                    raise failed  # the stop never reached Codex: say so instead of "stopping"
+                if not failed:
+                    run.withdraw_questions()
                 return self.reply(200, {"status": "stopping"})
             if rest == ["steer"] and cmd == "POST":
                 body = self.body()
@@ -852,6 +1371,15 @@ class Handler(BaseHTTPRequestHandler):
                 choice = str(body.get("choice") or "deny")
                 b.approve(run, choice, str(body.get("request_id") or ""))
                 return self.reply(200, {"choice": choice})
+            if rest == ["clarify"] and cmd == "POST":
+                body = self.body()
+                try:
+                    b.clarify(run, body.get("request_id"), body.get("answer"))
+                except KeyError as exc:
+                    return self.reply(404, {"error": str(exc)})
+                except RuntimeError as exc:
+                    return self.reply(409, {"error": str(exc)})
+                return self.reply(200, {"ok": True})
         return self.reply(501, {"error": "unsupported bridge operation"})
 
     def handle_route(self):
@@ -862,10 +1390,11 @@ class Handler(BaseHTTPRequestHandler):
         except RpcError as exc:
             msg = str(exc)
             missing = any(s in msg.lower() for s in ("not found", "no thread", "no rollout found"))
-            self.reply(404 if missing else 502, {"error": {"message": msg}})
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+            self.reply(503 if isinstance(exc, RpcUnavailable) else 404 if missing else 502, {"error": {"message": msg}})
+        except (BrokenPipeError, ConnectionResetError) as exc:
+            log_failure("Companion client disconnected", exc, logging.DEBUG)
         except Exception as exc:
+            log_failure("Codex bridge request failed", exc)
             self.reply(500, {"error": {"message": str(exc) or type(exc).__name__}})
 
     do_GET = do_POST = do_PATCH = do_DELETE = handle_route

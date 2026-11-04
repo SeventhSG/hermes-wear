@@ -401,12 +401,12 @@ class NodeWakeTest(unittest.TestCase):
         self.assertEqual(hub.node_wake({"node": "bad node; rm"})[1], 400)
         cfg = SimpleNamespace(returncode=0, stdout="description: x\n", stderr="")
         with mock.patch.object(hub, "pve_cmd", side_effect=lambda c: c), mock.patch.object(hub.subprocess, "run", return_value=cfg):
-            self.assertEqual(hub.node_wake({"node": "stormnode2"})[1], 409)  # no MAC configured
-        cfg.stdout = "wakeonlan: 00:e0:6c:39:96:13\n"
+            self.assertEqual(hub.node_wake({"node": "pve2"})[1], 409)  # no MAC configured
+        cfg.stdout = "wakeonlan: aa:bb:cc:dd:ee:02\n"
         with mock.patch.object(hub, "pve_cmd", side_effect=lambda c: c), mock.patch.object(hub.subprocess, "run", return_value=cfg), \
                 mock.patch.object(hub, "_pvesh", return_value="") as pvesh, mock.patch.object(hub, "_audit"):
-            self.assertEqual(hub.node_wake({"node": "stormnode2"}), ({"ok": True}, 200))
-            pvesh.assert_called_once_with("create", "/nodes/stormnode2/wakeonlan")
+            self.assertEqual(hub.node_wake({"node": "pve2"}), ({"ok": True}, 200))
+            pvesh.assert_called_once_with("create", "/nodes/pve2/wakeonlan")
 
 
 
@@ -435,7 +435,7 @@ class RrdTest(unittest.TestCase):
 
 class TaskLogTest(unittest.TestCase):
     def test_guards(self):
-        self.assertEqual(hub.infra_task_log("stormnode2", "UPID:x; rm -rf /")[1], 400)
+        self.assertEqual(hub.infra_task_log("pve2", "UPID:x; rm -rf /")[1], 400)
         self.assertEqual(hub.infra_task_log("bad node", "UPID:n:1:2:3:vzstart:140:root@pam:")[1], 400)
         with mock.patch.object(hub, "_pvesh", return_value=[{"n": 1, "t": "starting"}, {"n": 2, "t": "TASK OK"}]) as p:
             self.assertEqual(hub.infra_task_log("n", "UPID:n:1:2:3:vzstart:140:root@pam:"), ({"ok": True, "lines": ["starting", "TASK OK"]}, 200))
@@ -600,6 +600,74 @@ class BridgeTokenOta(unittest.TestCase):
                 self.assertEqual(ok, handler._authed(), path)
 
 
+class HermesUsage(unittest.TestCase):
+    def gateway(self, usage):
+        patcher = mock.patch.object(hub, "_Gateway")
+        gateway = patcher.start().return_value.__enter__.return_value
+        self.addCleanup(patcher.stop)
+        gateway.resume.return_value = {"session_id": "runtime-session"}
+        gateway.call.return_value = usage
+        return gateway
+
+    def test_context_and_tokens_use_resumed_session_and_profile(self):
+        gateway = self.gateway({"context_used": 5000, "context_max": 128000,
+                                "input": 6000, "output": 120, "reasoning": 80, "total": 6120})
+        data, code = hub.gw_usage({"session_id": "stored-session", "profile": "work"})
+        self.assertEqual(code, 200)
+        gateway.resume.assert_called_once_with("stored-session", "work")
+        gateway.call.assert_called_once_with("session.usage", {"session_id": "runtime-session"}, timeout=20)
+        self.assertEqual(data["context"], {"used_tokens": 5000, "window_tokens": 128000,
+                                           "percent": 3.90625, "source": "last_turn"})
+        self.assertEqual(data["session"], {"input_tokens": 6000, "output_tokens": 120,
+                                           "reasoning_tokens": 80, "total_tokens": 6120})
+        self.assertNotIn("limits", data)
+
+    def test_absent_fields_and_estimated_context(self):
+        gateway = self.gateway({})
+        data, code = hub.gw_usage({"session_id": "S"})
+        self.assertEqual(code, 200)
+        self.assertEqual(set(data), {"as_of"})
+        gateway.call.return_value = {"context_used": 150, "context_max": 100, "context_estimated": True}
+        data, _ = hub.gw_usage({"session_id": "S"})
+        self.assertEqual(data["context"]["source"], "estimate")
+        self.assertEqual(data["context"]["percent"], 100)
+
+    def test_missing_session_does_not_open_gateway_and_rpc_errors_are_502(self):
+        gateway = self.gateway({})
+        self.assertEqual(hub.gw_usage({})[1], 400)
+        gateway.resume.assert_not_called()
+        gateway.call.side_effect = hub.GatewayError("unavailable")
+        data, code = hub.gw_route(hub.gw_usage, {"session_id": "S"})
+        self.assertEqual(code, 502)
+        self.assertEqual(data["error"], "unavailable")
+
+    def test_busy_gateway_does_not_queue_another_resume(self):
+        gateway = self.gateway({})
+        with mock.patch.object(hub, "_gw_lock") as lock:
+            lock.acquire.return_value = False
+            data, code = hub.gw_route(hub.gw_usage, {"session_id": "S"})
+            lock.acquire.assert_called_once_with(timeout=2)
+            lock.release.assert_not_called()
+        self.assertEqual(code, 502)
+        self.assertIn("busy", data["error"])
+        gateway.resume.assert_not_called()
+
+    def test_http_route_passes_query_and_requires_auth(self):
+        handler = hub.Handler.__new__(hub.Handler)
+        handler.path = "/hermes/usage?session_id=stored-session&profile=work"
+        handler._json = mock.Mock()
+        handler._authed = mock.Mock(return_value=True)
+        with mock.patch.object(hub, "gw_usage", return_value=({"as_of": 123}, 200)) as usage:
+            handler.do_GET()
+            usage.assert_called_once_with({"session_id": "stored-session", "profile": "work"})
+            handler._json.assert_called_once_with({"as_of": 123}, 200)
+            handler._json.reset_mock()
+            handler._authed.return_value = False
+            handler.do_GET()
+            self.assertEqual(usage.call_count, 1)
+            self.assertEqual(handler._json.call_args.args[1], 401)
+
+
 class ApprovalsMode(unittest.TestCase):
     CONFIG = "model:\n  default: x\napprovals:\n  mode: smart   # how risky commands are handled\n  timeout: 60\nother:\n  mode: nope\n"
 
@@ -646,7 +714,7 @@ class WakeMachine(unittest.TestCase):
 
     def configure(self, **extra):
         with open(os.path.join(self.home.name, "wake.json"), "w") as f:
-            json.dump(dict({"mac": "D8:BB:C1:37:A8:89", "host": "192.168.0.150", "port": 10300}, **extra), f)
+            json.dump(dict({"mac": "AA:BB:CC:DD:EE:01", "host": "192.168.1.150", "port": 10300}, **extra), f)
 
     def test_nothing_is_sent_without_a_configured_target(self):
         with mock.patch.object(hub.socket, "socket") as sock:
@@ -667,8 +735,8 @@ class WakeMachine(unittest.TestCase):
         sent = sock.return_value.sendto.call_args_list
         self.assertEqual(2, len(sent))  # subnet broadcast + limited broadcast, from the first call only
         pkt, addr = sent[0][0]
-        self.assertEqual(b"\xff" * 6 + bytes.fromhex("D8BBC137A889") * 16, pkt)
-        self.assertEqual(("192.168.0.255", 9), addr)
+        self.assertEqual(b"\xff" * 6 + bytes.fromhex("AABBCCDDEE01") * 16, pkt)
+        self.assertEqual(("192.168.1.255", 9), addr)
 
     def test_a_bad_mac_is_ignored(self):
         self.configure(mac="nonsense")

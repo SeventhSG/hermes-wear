@@ -41,6 +41,7 @@ public final class RunManager {
         public final List<String> commentary = new ArrayList<>();
         /** Messages steered into this run, shown in the live view until the transcript reloads. */
         public final List<String> steers = new ArrayList<>();
+        public final java.util.Set<String> queuedSteers = java.util.Collections.synchronizedSet(new java.util.HashSet<>());
         /**
          * The run in arrival order, for the live view: a StringBuilder is one assistant message, a ToolCall a tool,
          * a {@link Note} a steer or commentary. Text after a tool, steer or new message starts a new segment.
@@ -63,7 +64,32 @@ public final class RunManager {
             steers.add(s); timeline.add(new Note(true, s));
             return true;
         }
+        /** Caller holds the lock. IDs isolate parallel tools; old servers still match by name. */
+        void onToolEvent(String state, String name, String preview, String argsJson, String itemId) {
+            if ("started".equals(state)) {
+                HermesApi.ToolCall call = new HermesApi.ToolCall(itemId, name, HermesApi.ToolCall.startArgs(name, preview, argsJson));
+                tools.add(call);
+                timeline.add(call);
+            } else {
+                for (int i = tools.size() - 1; i >= 0; i--) {
+                    HermesApi.ToolCall t = tools.get(i);
+                    boolean noId = itemId == null || itemId.isEmpty(), cardNoId = t.id == null || t.id.isEmpty();
+                    // A card that started without an id still matches by name, or it would stay "running" forever.
+                    boolean matches = noId || cardNoId ? t.name.equals(name) : itemId.equals(t.id);
+                    if (matches && "running".equals(t.status)) {
+                        if ("output".equals(state)) t.result = appendCapped(t.result, preview, MAX_TOOL_OUTPUT);
+                        else {
+                            t.status = "failed".equals(state) ? "failed" : "completed";
+                            if (preview != null && !preview.isEmpty()) t.result = preview;
+                        }
+                        break;
+                    }
+                }
+            }
+            if (!"output".equals(state)) lastToolLine = Tools.label(name) + (preview == null || preview.isEmpty() ? "" : " · " + preview);
+        }
         public volatile HermesApi.Approval approval;
+        public volatile UsageState usage;
         public volatile HermesApi.RunOutcome outcome;
         public volatile String error, lastToolLine = "";
         public volatile String agentFailure;
@@ -81,10 +107,14 @@ public final class RunManager {
             this(api, profileId, sessionId, sessionTitle, userText, presence, null, null);
         }
         LiveRun(AgentBackend api, String profileId, String sessionId, String sessionTitle, String userText, boolean presence, Object payload, String systemMessage) {
-            this.api = api; this.profileId = profileId; this.sessionId = sessionId; this.sessionTitle = sessionTitle == null ? "Hermes" : sessionTitle; this.userText = userText; this.presence = presence; this.payload = payload; this.systemMessage = systemMessage;
+            this.api = api; this.profileId = profileId; this.sessionId = sessionId; this.sessionTitle = sessionTitle == null ? Backends.type(api) : sessionTitle; this.userText = userText; this.presence = presence; this.payload = payload; this.systemMessage = systemMessage;
         }
         public boolean belongsTo(String profile, String session) { return profileId.equals(profile) && sessionId.equals(session); }
         public boolean active() { return outcome == null && error == null; }
+        /** A finished run the chat has not fully handled yet (resume re-runs finishRun until this turns false). */
+        public boolean needsFinish() { return !actionsHandled || (voice && !spoken); }
+        /** The failure was put on screen: nothing is left to do on later resumes. */
+        public void errorShown() { actionsHandled = true; spoken = true; }
         public String finalText() {
             if (outcome != null && !outcome.finalText.isEmpty()) return outcome.finalText;
             return text.toString();
@@ -165,36 +195,28 @@ public final class RunManager {
             @Override public void onSteer(String text) { boolean added; synchronized (run) { added = run.addSteer(text); } if (added) post(run, UPDATE_DELTA); }
             public void onTool(String state, String name, String preview) { onToolEvent(state, name, preview, ""); }
             @Override public void onToolEvent(String state, String name, String preview, String argsJson) {
-                synchronized (run) {
-                    if ("started".equals(state)) {
-                        HermesApi.ToolCall call = HermesApi.ToolCall.live(name, HermesApi.ToolCall.startArgs(name, preview, argsJson));
-                        run.tools.add(call);
-                        run.timeline.add(call);
-                    } else if ("output".equals(state)) {
-                        for (int i = run.tools.size() - 1; i >= 0; i--) {
-                            HermesApi.ToolCall t = run.tools.get(i);
-                            if (t.name.equals(name) && "running".equals(t.status)) { t.result += preview == null ? "" : preview; break; }
-                        }
-                    } else {
-                        for (int i = run.tools.size() - 1; i >= 0; i--) {
-                            HermesApi.ToolCall t = run.tools.get(i);
-                            if (t.name.equals(name) && "running".equals(t.status)) {
-                                t.status = "failed".equals(state) ? "failed" : "completed";
-                                if (preview != null && !preview.isEmpty()) t.result = preview;
-                                break;
-                            }
-                        }
-                    }
-                    if (!"output".equals(state)) run.lastToolLine = Tools.label(name) + (preview == null || preview.isEmpty() ? "" : " · " + preview);
+                onToolEvent(state, name, preview, argsJson, "");
+            }
+            @Override public void onToolEvent(String state, String name, String preview, String argsJson, String itemId) {
+                synchronized (run) { run.onToolEvent(state, name, preview, argsJson, itemId); }
+                if ("output".equals(state)) {   // chatty commands emit thousands of deltas: repaint at most every 200 ms
+                    long now = System.nanoTime() / 1_000_000L;
+                    if (now - lastOutputPost < 200) return;
+                    lastOutputPost = now;
                 }
                 post(run, UPDATE_TOOL);
             }
+            private long lastOutputPost;
             @Override public void onReasoning(String delta) { synchronized (run) { run.reasoning.append(delta); } post(run, UPDATE_REASONING); }
             @Override public void onCommentary(String text) { synchronized (run) { run.commentary.add(text); run.timeline.add(new LiveRun.Note(false, text)); } post(run, UPDATE_COMMENTARY); }
             @Override public void onApproval(HermesApi.Approval approval) {
                 run.approval = approval;
                 if (approval == null) main.post(() -> Notifier.cancelApproval(app, run.profileId, run.sessionId));
                 post(run, approval == null ? UPDATE_TOOL : UPDATE_APPROVAL);
+            }
+            @Override public void onUsage(org.json.JSONObject event) {
+                synchronized (run) { run.usage = UsageState.merge(run.usage, event); }
+                post(run, "usage");
             }
             @Override public void onRunFinished(HermesApi.RunOutcome outcome) {
                 DeviceActions.Parsed parsed = DeviceActions.parse(outcome.finalText);
@@ -238,7 +260,7 @@ public final class RunManager {
         if (q != null && q.clarify) { answer(run, text, done); return; }   // a typed reply answers the pending question
         streams.submit(() -> {
             HermesApi.Result r = run.runId == null ? HermesApi.Result.error("The run is still starting") : run.api.steerRun(run.runId, text);
-            if (r.ok) synchronized (run) { run.addSteer(text); }
+            if (r.ok) synchronized (run) { if (ChatLogic.queuedSteer(r.text)) run.queuedSteers.add(text); run.addSteer(text); }
             main.post(() -> { if (done != null) done.accept(r); });
         });
     }
@@ -274,6 +296,18 @@ public final class RunManager {
         });
     }
 
+    static final int MAX_TOOL_OUTPUT = 64 * 1024;
+
+    /** Appends streamed tool output, keeping only the newest {@code max} chars so a chatty command cannot grow without bound. */
+    static String appendCapped(String current, String add, int max) {
+        if (add == null || add.isEmpty()) return current;
+        String all = current + add;
+        return all.length() <= max ? all : all.substring(all.length() - max);
+    }
+
+    /** The user's own Stop ends a run with this error; it is not a failure worth a notification. */
+    static boolean isCancelled(String error) { return "Cancelled".equals(error); }
+
     private void post(LiveRun run, String kind) { main.post(() -> dispatch(run, kind)); }
 
     private void dispatch(LiveRun run, String kind) {
@@ -287,7 +321,7 @@ public final class RunManager {
             case UPDATE_FINISHED: case UPDATE_ERROR:
                 if (kind.equals(UPDATE_FINISHED)) HermesWidgetProvider.record(app, run.sessionId, run.sessionTitle, run.finalText()); else HermesWidgetProvider.update(app);
                 Notifier.cancelApproval(app, run.profileId, run.sessionId);
-                if (!watched && !run.presence && !"Reply drafts".equals(run.sessionTitle)) Notifier.result(app, run);
+                if (!watched && !run.presence && !"Reply drafts".equals(run.sessionTitle) && !isCancelled(run.error)) Notifier.result(app, run);
                 // A steer that landed after Hermes' last tool call comes back unread; it is the next turn.
                 String late = kind.equals(UPDATE_FINISHED) && run.outcome != null ? run.outcome.pendingSteer : "";
                 if (!late.isEmpty()) start(run.api, run.profileId, run.sessionId, run.sessionTitle, late, run.systemMessage, late, run.presence);
@@ -298,5 +332,5 @@ public final class RunManager {
         RunService.refresh(app);
     }
 
-    private void notifyObservers(LiveRun run, String kind) { for (Observer o : observers) try { o.onRunUpdate(run, kind); } catch (Throwable ignored) {} }
+    private void notifyObservers(LiveRun run, String kind) { for (Observer o : observers) try { o.onRunUpdate(run, kind); } catch (Throwable t) { android.util.Log.w("RunManager", "observer failed on " + kind, t); } }
 }

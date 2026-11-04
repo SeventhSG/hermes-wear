@@ -126,24 +126,30 @@ public final class PermissionCentreActivity extends Activity {
                     });
         }
 
-        LinearLayout replies = section("REPLY DRAFTING");
-        toggle(replies, "Draft replies from notifications", listenerAccess() ? "Hermes asks before reading; only Send sends a reply" : "Requires notification access in Android settings",
+        LinearLayout replies = section("MESSAGES");
+        toggle(replies, "Let Hermes watch messages", listenerAccess() ? "Read quietly; a plan pops up to add to your calendar. Ask Hermes about them anytime" : "Requires notification access in Android settings",
                 store.replyDrafting(), on -> {
                     store.replyDrafting(on);
                     if (on && !listenerAccess()) startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS));
                     render();
                 });
-        TextView appsHint = Ui.text(this, "Choose apps Hermes may read for reply drafts", 12, Ui.SUB, false);
+        toggle(replies, "Suggest a reply for every message", "Off: stay quiet unless there's a plan; only Send ever sends", store.replyEveryMessage(), on -> store.replyEveryMessage(on));
+        boolean allApps = store.replyAllApps();
+        toggle(replies, "Every messaging app", "Any app that shows message notifications; off: only the apps ticked below", allApps, on -> { store.replyAllApps(on); render(); });
+        TextView appsHint = Ui.text(this, allApps ? "Untick an app to mute it (a suggestion's Mute button does the same)" : "Choose apps Hermes may read for reply suggestions", 12, Ui.SUB, false);
         appsHint.setPadding(dp(16), dp(12), dp(16), dp(4));
         replies.addView(appsHint);
-        for (String[] app : ReplyListenerService.SUGGESTED_APPS) {
-            if (getPackageManager().getLaunchIntentForPackage(app[0]) == null) continue;
+        java.util.LinkedHashMap<String, String> replyShown = new java.util.LinkedHashMap<>();
+        for (String[] app : ReplyListenerService.SUGGESTED_APPS) if (getPackageManager().getLaunchIntentForPackage(app[0]) != null) replyShown.put(app[0], app[1]);
+        for (String pkg : store.replyMuted()) if (!replyShown.containsKey(pkg)) replyShown.put(pkg, appLabel(pkg));
+        for (java.util.Map.Entry<String, String> e : replyShown.entrySet()) {
+            String[] app = {e.getKey(), e.getValue()};
             LinearLayout choice = row(app[1], app[0]);
             CheckBox check = new CheckBox(this);
             check.setButtonTintList(ColorStateList.valueOf(Ui.BLUE));
-            check.setContentDescription("Allow " + app[1] + " reply drafts");
-            check.setChecked(store.replyApps().contains(app[0]));
-            check.setOnCheckedChangeListener((button, on) -> store.replyApp(app[0], on));
+            check.setContentDescription("Allow " + app[1] + " reply suggestions");
+            check.setChecked(store.replyWatches(app[0]));
+            check.setOnCheckedChangeListener((button, on) -> { if (store.replyAllApps()) store.replyMute(app[0], !on); else store.replyApp(app[0], on); });
             choice.addView(check, new LinearLayout.LayoutParams(dp(48), dp(48)));
             choice.setOnClickListener(v -> check.performClick());
             choice.setMinimumHeight(dp(72));

@@ -17,7 +17,6 @@ import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.TextPaint;
 import android.text.method.LinkMovementMethod;
-import android.text.style.BackgroundColorSpan;
 import android.text.style.ClickableSpan;
 import android.text.style.ForegroundColorSpan;
 import android.text.style.RelativeSizeSpan;
@@ -92,7 +91,7 @@ final class MarkdownView {
                     v = t; top = first ? 0 : dp(a, 10);
                     break;
                 }
-                case CODE: v = code(a, b.text, b.extra, longClick); top = first ? 0 : dp(a, 8); break;
+                case CODE: v = b.level == 1 && ArtifactActivity.live(b.extra) ? ArtifactActivity.card(a, b.text, longClick) : code(a, b.text, b.extra, longClick); top = first ? 0 : dp(a, 8); break;
                 case QUOTE: {
                     LinearLayout q = new LinearLayout(a);
                     View bar = new View(a); bar.setBackgroundColor(Ui.BLUE);
@@ -133,7 +132,7 @@ final class MarkdownView {
     static TextView text(Activity a, String md, int color, float size, View.OnLongClickListener longClick) {
         md = capped(md);
         TextView t = Ui.text(a, "", size, color, false);
-        t.setLineSpacing(0, 1.18f);
+        Ui.leading(t, 1.42f);
         t.setText(spans(a, md));
         t.setLinkTextColor(Ui.LINK);
         if (hasLink(md)) t.setMovementMethod(LinkMovementMethod.getInstance());
@@ -154,7 +153,6 @@ final class MarkdownView {
                 case STRIKE: sb.setSpan(new StrikethroughSpan(), s.start, s.end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE); break;
                 case CODE:
                     sb.setSpan(new TypefaceSpan("monospace"), s.start, s.end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-                    sb.setSpan(new BackgroundColorSpan(0x33a1a9b4), s.start, s.end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
                     sb.setSpan(new ForegroundColorSpan(Ui.CODE), s.start, s.end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
                     sb.setSpan(new RelativeSizeSpan(.92f), s.start, s.end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
                     break;

@@ -18,7 +18,7 @@ import java.util.concurrent.TimeUnit;
  * Backup addresses for the same server, like Hermes Desktop's saved remote connection: the LAN IP,
  * the Tailscale IP / MagicDNS name, or a public https URL. A bare host ("100.x.y.z") stands in for
  * the server on every port (Hermes API, hub and the Wyoming voice ports); a full URL ("https://hermes.example.com") stands in
- * for the Hermes API, with the hub at its /hub path and the Codex bridge at /codex. Requests go to whichever address last answered; when a connect fails
+ * for the Hermes API, with the hub at its /hub path, the Codex bridge at /codex and the Claude Code bridge at /claude. Requests go to whichever address last answered; when a connect fails
  * all the other addresses are probed at once and the first to accept a TCP connection takes over for every client. A network
  * change (Wi-Fi to mobile data and back) re-runs that race in the background, so the next request does not wait on a dead address.
  * With a device certificate ({@link DeviceCert}) nothing goes over plain HTTP except across Tailscale (WireGuard): LAN http
@@ -29,7 +29,7 @@ final class Reach {
 
     private static volatile List<String> backups = Collections.emptyList();
     private static volatile int apiPort = -1;
-    static final int HUB_PORT = 8791, CODEX_PORT = 8795, GATEWAY_PORT = 8797;
+    static final int HUB_PORT = 8791, CODEX_PORT = 8795, CLAUDE_PORT = 8796, GATEWAY_PORT = 8797;
     /** "host:port" of the configured address -> base ("scheme://host:port") currently in use */
     private static final Map<String, String> active = new ConcurrentHashMap<>();
 
@@ -39,6 +39,8 @@ final class Reach {
     /** host:port keys (and hub origins) already raced on the current network: the first request of each races once, the rest reuse it. */
     private static final Set<String> decided = ConcurrentHashMap.newKeySet();
     private static final Map<String, Object> deciding = new ConcurrentHashMap<>();
+    /** Proxy-denied service bases on this network; a TCP handshake alone cannot make them usable. */
+    private static final Set<String> blocked = ConcurrentHashMap.newKeySet();
     /** First try on an address while backups exist: a dead LAN IP on mobile data must not stall a request for 15 s. */
     static final int FIRST_CONNECT_MS = 4_000;
     private static final int PROBE_MS = 3_000;
@@ -68,6 +70,7 @@ final class Reach {
         active.clear();
         hubActive.clear();
         decided.clear();
+        blocked.clear();
     }
 
     static boolean hasBackups() { return !backups.isEmpty(); }
@@ -106,9 +109,28 @@ final class Reach {
 
     /** The default network changed: forget which address worked and race them all again, off the caller's thread. */
     static void networkChanged() {
+        blocked.clear();
         decided.clear();
         if (backups.isEmpty()) return;
+        if (!claimRound()) return;   // a round is already probing; it runs once more when it finishes
         Thread t = new Thread(() -> {
+            do { try { raceAll(); } catch (Throwable ignored) {} } while (roundDone());
+        }, "reach-race");
+        t.setDaemon(true); t.start();
+    }
+
+    /** 0 idle, 1 one probe round running, 2 running with another change queued: flapping Wi-Fi/mobile data cannot pile up threads. */
+    private static final java.util.concurrent.atomic.AtomicInteger rounds = new java.util.concurrent.atomic.AtomicInteger();
+    /** True when the caller should start the round; false when one is running (and has now been asked to repeat). */
+    static boolean claimRound() { return rounds.getAndUpdate(n -> n == 0 ? 1 : 2) == 0; }
+    /** True when another change arrived meanwhile, so the round runs again. */
+    static boolean roundDone() {
+        if (rounds.compareAndSet(1, 0)) return false;
+        rounds.set(1); return true;
+    }
+
+    private static void raceAll() {
+        {
             for (String url : seen) try {
                 URL u = new URL(url);
                 List<String> bases = candidates(u);
@@ -122,8 +144,7 @@ final class Reach {
                 String best = race(hubCandidates(primary), null);
                 if (best != null) hubActive.put(primary, best);
             }
-        }, "reach-race");
-        t.setDaemon(true); t.start();
+        }
     }
 
     /** Raw TCP (Wyoming speech-to-text and voice): connect to host:port, or to the first backup address that answers. */
@@ -198,6 +219,7 @@ final class Reach {
             String best = race(bases, current == null ? bases.get(0) : current);
             if (best == null) return false;
             if (best.equals(bases.get(0))) active.remove(key(u)); else active.put(key(u), best);
+            decided.add(key(u));
             return true;
         } catch (Exception ignored) {}
         return false;
@@ -208,7 +230,7 @@ final class Reach {
         BlockingQueue<String> answers = new LinkedBlockingQueue<>();
         int n = 0;
         for (String b : bases) {
-            if (b.equals(skip)) continue;
+            if (b.equals(skip) || blocked.contains(b)) continue;
             n++;
             Thread t = new Thread(() -> answers.add(reachable(b) ? b : ""), "reach-probe");
             t.setDaemon(true); t.start();
@@ -218,10 +240,35 @@ final class Reach {
             for (int i = 0; i < n; i++) {
                 String r = answers.poll(Math.max(1, end - System.currentTimeMillis()), TimeUnit.MILLISECONDS);
                 if (r == null) return null;
-                if (!r.isEmpty()) return r;
+                if (!r.isEmpty() && !blocked.contains(r)) return r;
             }
         } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
         return null;
+    }
+
+    /** A proxy rejected this route before the API handled the request. Structured API denials stay auth errors. */
+    static boolean rejectProxy(String configured, URL actual, int code, String body) {
+        if (backups.isEmpty() || (code != 403 && code != 421 && code != 495 && code != 496)) return false;
+        String text = body == null ? "" : body.trim();
+        try {
+            org.json.JSONTokener json = new org.json.JSONTokener(text);
+            Object value = json.nextValue();
+            if (json.nextClean() == 0 && (!(value instanceof String) || text.startsWith("\""))) return false;
+        } catch (org.json.JSONException ignored) {}
+        try {
+            URL u = new URL(configured);
+            String primary = u.getProtocol() + "://" + hostPart(u.getHost()) + ":" + port(u);
+            for (String candidate : candidates(u)) {
+                if (candidate.equals(primary) && !decided.contains(key(u))) continue;
+                URL target = new URL(candidate + u.getFile());
+                if (target.getProtocol().equals(actual.getProtocol()) && target.getHost().equalsIgnoreCase(actual.getHost())
+                        && port(target) == port(actual) && target.getPath().equals(actual.getPath())) {
+                    blocked.add(candidate);
+                    return true;
+                }
+            }
+        } catch (Exception ignored) {}
+        return false;
     }
 
     static List<String> candidates(URL u) {
@@ -231,8 +278,8 @@ final class Reach {
         for (String b : backups) {
             String base;
             if (b.contains("://")) {
-                // A public URL fronts the Hermes API at /, the hub at /hub, the Codex bridge at /codex and the gateway platform at /gateway (one reverse-proxy host).
-                String sub = port == apiPort ? "" : port == HUB_PORT ? "/hub" : port == CODEX_PORT ? "/codex" : port == GATEWAY_PORT ? "/gateway" : null;
+                // A public URL fronts the Hermes API at /, the hub at /hub, the Codex bridge at /codex, the Claude Code bridge at /claude and the gateway platform at /gateway (one reverse-proxy host).
+                String sub = port == apiPort ? "" : port == HUB_PORT ? "/hub" : port == CODEX_PORT ? "/codex" : port == CLAUDE_PORT ? "/claude" : port == GATEWAY_PORT ? "/gateway" : null;
                 if (sub == null) continue;
                 try { URL bu = new URL(b); base = bu.getProtocol() + "://" + hostPart(bu.getHost()) + ":" + port(bu) + bu.getPath() + sub; }
                 catch (Exception e) { continue; }

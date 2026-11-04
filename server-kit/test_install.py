@@ -157,7 +157,7 @@ class SkillStandardTest(unittest.TestCase):
         self.assertTrue(any("period" in e for e in errs))
 
     def test_missing_sections_host_names_and_local_paths_are_caught(self):
-        d = self._skill(body="# Demo\n\nRuns on openclaw from /home/bob/project/x and 192.168.1.5.\n")
+        d = self._skill(body="# Demo\n\nRuns on myserver.tail1234.ts.net from /home/bob/project/x and 192.168.1.5.\n")
         errs = " | ".join(check_skills.check_dir(d)[1])
         for needle in ("When to Use", "Pitfalls", "Verification", "host-specific", "machine-local", "private IP"):
             self.assertIn(needle, errs)

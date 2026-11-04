@@ -4,6 +4,20 @@ import static org.junit.Assert.*;
 import org.junit.Test;
 
 public class SettingsStoreTest {
+    @Test public void bridgeDefaultNamesFollowTheHarnessWithoutRenamingHermes() {
+        android.content.SharedPreferences prefs = NotificationOriginTest.preferences();
+        SettingsStore store = new SettingsStore(prefs);
+        for (String name : new String[]{"", "Hermes"}) {
+            prefs.edit().putString("profile_name",name).apply();
+            for (String harness : new String[]{"Claude Code", "Codex"}) {
+                prefs.edit().putString("server_type",harness).apply();
+                assertEquals(harness,store.profileName());
+            }
+            prefs.edit().putString("server_type","Hermes").apply();
+            assertEquals("Hermes",store.profileName());
+        }
+    }
+
     @Test public void hermesKeepsLegacyKey() {
         assertEquals("endpoint", SettingsStore.keyFor("endpoint", "Hermes"));
         assertEquals("api_key", SettingsStore.keyFor("api_key", "Hermes"));

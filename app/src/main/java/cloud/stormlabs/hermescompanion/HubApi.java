@@ -367,6 +367,11 @@ public final class HubApi {
         return out;
     }
 
+    /** Structured context and token usage from hermes serve, when the hub supports it. */
+    public JSONObject hermesUsage(String profile, String sessionId, boolean refresh) throws Exception {
+        return requestJson("GET", "/hermes/usage?session_id=" + path(sessionId) + "&profile=" + path(profile) + (refresh ? "&refresh=1" : ""), null);
+    }
+
     /** Runs a slash command in a stored chat: {type: exec|send|skill, output, message, notice, warning}. */
     public JSONObject hermesSlash(String profile, String sessionId, String command) throws Exception {
         readMs = 700_000; // /compress may legitimately take ten minutes
@@ -478,7 +483,7 @@ public final class HubApi {
             JSONArray s = x.optJSONArray("sample");
             if (s != null) for (int i = 0; i < s.length(); i++) sample.add(s.optString(i));
         }
-        /** "openclaw · 12 updates · 3 security · reboot needed" */
+        /** "homeserver · 12 updates · 3 security · reboot needed" */
         public String line() {
             return name + " · " + (packages == 0 ? "up to date" : packages + (packages == 1 ? " update" : " updates")) + (security > 0 ? " · " + security + " security" : "") + (reboot ? " · reboot needed" : "");
         }

@@ -197,7 +197,21 @@ public final class WakeWordService extends Service {
     }
 
     static String stripWake(String text) {
-        return text == null ? "" : LEADING_WAKE.matcher(text.trim()).replaceFirst("").trim();
+        if (text == null) return "";
+        String custom = WakePhrase.normalize(phrase);
+        if (custom.isEmpty()) return LEADING_WAKE.matcher(text.trim()).replaceFirst("").trim();
+        StringBuilder p = new StringBuilder("^\\W*");
+        for (String w : custom.split(" ")) p.append(java.util.regex.Pattern.quote(w)).append("\\W*");
+        return java.util.regex.Pattern.compile(p.toString(), java.util.regex.Pattern.CASE_INSENSITIVE).matcher(text.trim()).replaceFirst("").trim();
+    }
+
+    /** The custom wake phrase in use ("" = Hey Hermes); set when listening starts, read by {@link #stripWake}. */
+    static volatile String phrase = "";
+
+    /** Keywords for the spotter: the built-in Hermes spellings and decoys, or the user's phrase. */
+    static String keywords(SettingsStore store) {
+        String tokens = store.wakeTokens();
+        return tokens.isEmpty() ? KEYWORDS : WakePhrase.keyword(tokens, WakePhrase.scaled(store.wakeThreshold(), store.wakeSensitivity())) + "\n";
     }
 
     // ── service ─────────────────────────────────────────────────────────────────────────────────
@@ -266,8 +280,9 @@ public final class WakeWordService extends Service {
             return;
         }
         SettingsStore store = new SettingsStore(this);
-        String sensitivity = store.wakeSensitivity();
-        KeywordSpotter kws = new KeywordSpotter(null, spotterConfig(sensitivity));
+        String sensitivity = store.wakeSensitivity(), keywords = keywords(store);
+        phrase = store.wakeTokens().isEmpty() ? "" : store.wakePhrase();
+        KeywordSpotter kws = new KeywordSpotter(null, spotterConfig(this, keywords, threshold(sensitivity)));
         OnlineStream stream = null;
         AudioRecord rec = null;
         try {
@@ -288,7 +303,7 @@ public final class WakeWordService extends Service {
                     SystemClock.sleep(200);
                     continue;
                 }
-                if (!sensitivity.equals(store.wakeSensitivity())) return; // finally releases this spotter and recorder first
+                if (!sensitivity.equals(store.wakeSensitivity()) || !keywords.equals(keywords(store))) return; // finally releases this spotter and recorder first
                 if (rec == null) {
                     int min = AudioRecord.getMinBufferSize(RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
                     synchronized (lock) {
@@ -361,9 +376,9 @@ public final class WakeWordService extends Service {
         }
     }
 
-    private KeywordSpotterConfig spotterConfig(String sensitivity) throws Exception {
-        File dir = modelDir(this), keywords = new File(dir, "keywords.txt");
-        try (FileOutputStream out = new FileOutputStream(keywords)) { out.write(KEYWORDS.getBytes(StandardCharsets.UTF_8)); }
+    static KeywordSpotterConfig spotterConfig(Context c, String keywordLines, float threshold) throws Exception {
+        File dir = modelDir(c), keywords = new File(dir, "keywords-" + Integer.toHexString(keywordLines.hashCode()) + ".txt"); // own file per keyword set: training and listening never overwrite each other
+        try (FileOutputStream out = new FileOutputStream(keywords)) { out.write(keywordLines.getBytes(StandardCharsets.UTF_8)); }
         OnlineTransducerModelConfig transducer = new OnlineTransducerModelConfig();
         transducer.setEncoder(new File(dir, ENCODER).getAbsolutePath());
         transducer.setDecoder(new File(dir, DECODER).getAbsolutePath());
@@ -381,7 +396,7 @@ public final class WakeWordService extends Service {
         config.setMaxActivePaths(4);
         config.setKeywordsFile(keywords.getAbsolutePath());
         config.setKeywordsScore(1.5f); // boosts the keyword path in the beam; decoys keep near-misses out
-        config.setKeywordsThreshold(threshold(sensitivity));
+        config.setKeywordsThreshold(threshold);
         config.setNumTrailingBlanks(1);
         return config;
     }

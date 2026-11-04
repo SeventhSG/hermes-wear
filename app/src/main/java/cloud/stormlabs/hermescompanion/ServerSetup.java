@@ -55,6 +55,19 @@ final class ServerSetup {
         }, "server-setup-probe").start();
     }
 
+    /** One tap from Settings when the gateway plugin is missing or broken: Hermes (re)installs just that module. */
+    static void repairGateway(Activity a, SettingsStore store) {
+        KitModules kit;
+        try { kit = KitModules.load(a); }
+        catch (Exception e) { Toast.makeText(a, "The bundled server pack is damaged: " + e.getMessage(), Toast.LENGTH_LONG).show(); return; }
+        java.util.Set<String> picked = kit.normalize(java.util.Collections.singleton("gateway-platform"));
+        start(a, store, host(store.endpoint()), (token, port) -> prompt(token, port, kit, picked, true) + RESTART_LAST, null);
+    }
+
+    /** Restarting hermes-gateway ends the chat doing the work, so it must be the very last step. */
+    static final String RESTART_LAST = "\n\nRestarting hermes-gateway ends this chat, so never do it mid-way: give me the summary first, then "
+            + "schedule it with `systemd-run --on-active=10 systemctl restart hermes-gateway`. The app reconnects by itself.";
+
     private static void start(Activity a, SettingsStore store, String host, java.util.function.BiFunction<String, Integer, String> prompt, Runnable opened) {
         Toast.makeText(a, "Starting server setup…", Toast.LENGTH_SHORT).show();
         Context app = a.getApplicationContext();

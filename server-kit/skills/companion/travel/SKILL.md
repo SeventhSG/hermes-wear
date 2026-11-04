@@ -44,7 +44,7 @@ For each leg or booking, extract:
 Emit one `device` block per leg or booking:
 
 ```device
-{"action":"calendar_event","title":"Flight LH1234 SOF→FRA","start":"2026-10-03T06:20","end":"2026-10-03T08:45","location":"Sofia Airport (SOF)","description":"Confirmation ABC123. Terminal 2."}
+{"action":"calendar_event","title":"Flight BA117 LHR→JFK","start":"2026-10-03T08:20","end":"2026-10-03T11:05","location":"Heathrow Airport (LHR)","description":"Confirmation ABC123. Terminal 2."}
 ```
 
 - `start` and `end` are local time, `YYYY-MM-DDTHH:MM`, no timezone suffix. Use the timezone of the place itself. Do not convert to server time.

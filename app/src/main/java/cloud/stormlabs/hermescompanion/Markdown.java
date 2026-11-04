@@ -87,7 +87,8 @@ public final class Markdown {
                     code.append(lines[i]);
                     i++;
                 }
-                out.add(new Block(Kind.CODE, code.toString(), 0, lang));
+                // level 1 = the fence is closed; a live page runs only once Hermes has finished writing it
+                out.add(new Block(Kind.CODE, code.toString(), i < lines.length ? 1 : 0, lang));
                 i++; // closing fence (or end of a still-streaming block)
                 continue;
             }

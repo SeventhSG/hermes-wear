@@ -55,7 +55,7 @@
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
-        android:label="Hermes"
+        android:label="${appLabel}"
         android:networkSecurityConfig="@xml/network_security_config"
         android:theme="@style/AppTheme"
         android:usesCleartextTraffic="true">
@@ -102,6 +102,11 @@
 
         <!-- One-shot ADB setup helper. It disables itself immediately after provisioning. -->
         <activity
+            android:name=".ArtifactActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden" />
+
+        <activity
             android:name=".ProvisionActivity"
             android:excludeFromRecents="true"
             android:exported="true"
@@ -110,6 +115,7 @@
 
         <activity
             android:name=".CrashActivity"
+            android:process=":crash"
             android:excludeFromRecents="true"
             android:exported="false"
             android:theme="@style/AppTheme" />

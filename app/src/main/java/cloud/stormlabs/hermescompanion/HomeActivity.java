@@ -119,7 +119,8 @@ public final class HomeActivity extends Activity implements RunManager.Observer 
                                 }))); return true; });
             }
             cell.setContentDescription(add ? "Add command" : tiles.get(i).label + ". Long press to edit or delete");
-            GridLayout.LayoutParams p = new GridLayout.LayoutParams(); p.width = width; p.height = -2;
+            // FILL makes both tiles in a row as tall as the taller one, so the grid stays even.
+            GridLayout.LayoutParams p = new GridLayout.LayoutParams(GridLayout.spec(GridLayout.UNDEFINED, GridLayout.FILL), GridLayout.spec(GridLayout.UNDEFINED)); p.width = width; p.height = -2;
             p.setMargins(dp(3), dp(3), dp(3), dp(3)); grid.addView(cell, p);
         }
         Ui.appearing(grid);
@@ -142,12 +143,12 @@ public final class HomeActivity extends Activity implements RunManager.Observer 
                     16, p.enabled && permitted ? Ui.TEXT : Ui.FAINT, true));
             row.addView(Ui.text(this, Math.round(p.radius) + " m radius · Arrive: " + shortText(p.arrive) + " · Leave: " + shortText(p.leave), 12, Ui.SUB, false));
             row.setOnClickListener(v -> placeActions(p));
-            LinearLayout.LayoutParams rp = match(-2); rp.bottomMargin = dp(8); body.addView(row, rp);
+            LinearLayout.LayoutParams rp = match(-2); rp.setMargins(dp(3), 0, dp(3), dp(8)); body.addView(row, rp);
         }
         TextView addPlace = Ui.text(this, "+  Add Home or Work place", 15, Ui.BLUE, true); addPlaceButton = addPlace;
         addPlace.setGravity(Gravity.CENTER_VERTICAL); addPlace.setPadding(dp(16), 0, 0, 0);
         addPlace.setBackground(Ui.ripple(this, Ui.RAISED, 14)); addPlace.setOnClickListener(v -> addPlace());
-        body.addView(addPlace, match(54));
+        LinearLayout.LayoutParams ap = match(54); ap.setMargins(dp(3), 0, dp(3), 0); body.addView(addPlace, ap);
     }
 
     private String shortText(String s) { return s.isEmpty() ? "off" : s.length() > 28 ? s.substring(0, 28) + "…" : s; }
@@ -199,7 +200,7 @@ public final class HomeActivity extends Activity implements RunManager.Observer 
     }
     private void updateReply(RunManager.LiveRun run) {
         String text = run.error != null ? run.error : run.finalText();
-        if (text.isEmpty()) text = run.active() ? "Hermes is working…" : "Done";
+        if (text.isEmpty()) text = run.active() ? Backends.type(run.api) + " is working…" : "Done";
         reply.setText(text);
         reply.setTextColor(run.error == null ? Ui.SUB : Ui.RED);
     }

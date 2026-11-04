@@ -7,6 +7,17 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
 public class HermesVoiceSessionTest {
+    @Test public void unresolvedSubmitLeavesThinkingAfterStaleResolutionDrainsItsWaiter() {
+        assertTrue(HermesVoiceSession.shouldIdleUnresolvedSession(5, 5, true, AssistantState.State.THINKING));
+        assertTrue(HermesVoiceSession.shouldIdleUnresolvedSession(4, 5, false, AssistantState.State.THINKING));
+    }
+
+    @Test public void oldSessionWaiterCannotResetNewVisibleWorkOrHideResolutionError() {
+        assertFalse(HermesVoiceSession.shouldIdleUnresolvedSession(4, 5, true, AssistantState.State.THINKING));
+        assertFalse(HermesVoiceSession.shouldIdleUnresolvedSession(5, 5, true, AssistantState.State.ERROR));
+        assertFalse(HermesVoiceSession.shouldIdleUnresolvedSession(4, 5, false, AssistantState.State.IDLE));
+    }
+
     @Test public void failedVoiceRunNeverSpeaksOrListens() {
         assertFalse(HermesVoiceSession.shouldSpeakReply(true, false, true, "Network error"));
         assertFalse(HermesVoiceSession.shouldListenAfterRun(true, true, "Network error"));

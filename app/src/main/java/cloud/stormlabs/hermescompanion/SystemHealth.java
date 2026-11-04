@@ -107,7 +107,7 @@ final class SystemHealth {
 
     static List<Reason> reasons(JSONObject health, String healthError, HubApi.Services ops, String opsError, int tokenBudget) {
         List<Reason> out = new ArrayList<>();
-        if (healthError != null) out.add(new Reason(DOWN, "Hermes unreachable: " + healthError, "hermes", null));
+        if (healthError != null) out.add(new Reason(DOWN, "Agent unreachable: " + healthError, "hermes", null));
         if (health != null) {
             String gateway = text(health, "gateway_state", "gateway");
             int g = stateLevel(gateway);

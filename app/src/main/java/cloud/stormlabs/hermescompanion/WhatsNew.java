@@ -35,6 +35,11 @@ final class WhatsNew {
             {"Natural voice and calls", "Optional Piper voice from your homelab in English and Bulgarian, talk-over-Hermes on headphones, a hands-free Call mode, and Hermes can ring you for urgent things. All in Settings \u203a Voice."},
     };
 
+    /** Mark current news as seen before first-run setup, including after data was cleared. */
+    static void onboardingStarted(Activity a) {
+        a.getSharedPreferences("whats_new", 0).edit().putInt("seen", VERSION).apply();
+    }
+
     static void maybeShow(Activity a) {
         SharedPreferences p = a.getSharedPreferences("whats_new", 0);
         int seen = p.getInt("seen", 0);

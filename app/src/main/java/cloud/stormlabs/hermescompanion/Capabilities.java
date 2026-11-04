@@ -15,6 +15,10 @@ public final class Capabilities {
 
     /** Keeps command suggestions and command execution behind the same capability check. */
     public boolean allowsCommand(String name) {
+        return allowsCommand(name, false);
+    }
+
+    public boolean allowsCommand(String name, boolean bridgeCommands) {
         switch (name) {
             case "jobs": return jobs;
             case "skills": return skills;
@@ -24,7 +28,8 @@ public final class Capabilities {
             case "fork": return forks;
             case "delete": return deletes;
             case "server": case "home": case "media": case "status":
-            case "undo": case "retry": case "rollback": return hub;
+            case "retry": case "rollback": return hub;
+            case "undo": return hub || bridgeCommands;
             default: return true;
         }
     }

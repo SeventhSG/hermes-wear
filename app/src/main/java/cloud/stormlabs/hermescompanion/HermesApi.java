@@ -186,6 +186,7 @@ public class HermesApi implements AgentBackend {
         void onComplete(String finalText);
         void onError(String error);
         default void onToolEvent(String state, String name, String preview, String argsJson) { onTool(state, name, preview); }
+        default void onToolEvent(String state, String name, String preview, String argsJson, String itemId) { onToolEvent(state, name, preview, argsJson); }
         default void onReasoning(String delta) {}
         default void onCommentary(String text) {}
         /** A new assistant message starts (the bridge marks message boundaries); {@code separator} still joins the full text. */
@@ -194,6 +195,7 @@ public class HermesApi implements AgentBackend {
         default void onSteer(String text) {}
         default void onApproval(Approval approval) {}
         default void onRunFinished(RunOutcome outcome) {}
+        default void onUsage(JSONObject usage) {}
         /** The event stream dropped (false) and came back (true); the run keeps going on the server meanwhile. */
         default void onConnection(boolean connected) {}
     }
@@ -202,7 +204,9 @@ public class HermesApi implements AgentBackend {
     public static final class StreamHandle {
         private volatile HttpURLConnection connection;
         private volatile boolean cancelled;
-        public void cancel() { cancelled = true; HttpURLConnection c = connection; if (c != null) try { c.disconnect(); } catch (Exception ignored) {} }
+        /** Backoff sleep that Stop cuts short. */
+        synchronized void sleep(long ms) throws InterruptedException { if (!cancelled) wait(ms); }
+        public void cancel() { synchronized (this) { cancelled = true; notifyAll(); } HttpURLConnection c = connection; if (c != null) try { c.disconnect(); } catch (Exception ignored) {} }
         public boolean cancelled() { return cancelled; }
     }
 
@@ -258,9 +262,13 @@ public class HermesApi implements AgentBackend {
 
     /** One selectable model from the gateway's provider catalog. */
     public static final class ModelOption {
-        public final String provider, id;
+        public final String provider, id, description;
         public final boolean current;
         public ModelOption(String provider, String id, boolean current) {
+            this(provider, id, current, "");
+        }
+        public ModelOption(String provider, String id, boolean current, String description) {
+            this.description = description == null ? "" : description;
             this.provider = provider == null ? "" : provider;
             this.id = id == null ? "" : id;
             this.current = current;
@@ -336,11 +344,22 @@ public class HermesApi implements AgentBackend {
 
     // ── sessions ────────────────────────────────────────────────────────────────────────────────
 
+    // Keep the wire row count: archived rows are filtered from the visible list.
+    static final class SessionPage extends ArrayList<SessionInfo> {
+        final int rawCount;
+        SessionPage(int rawCount) { this.rawCount = rawCount; }
+    }
+
+    static boolean hasMoreSessions(List<SessionInfo> page, int limit) {
+        return (page instanceof SessionPage ? ((SessionPage) page).rawCount : page.size()) >= limit;
+    }
+
     public List<SessionInfo> listSessions() throws Exception { return listSessions(100, 0); }
 
     public List<SessionInfo> listSessions(int limit, int offset) throws Exception {
         JSONObject root = requestJson("GET", "/api/sessions?limit=" + Math.max(1, Math.min(200, limit)) + "&offset=" + Math.max(0, offset), null);
-        JSONArray data = root.optJSONArray("data"); List<SessionInfo> out = new ArrayList<>();
+        JSONArray data = root.optJSONArray("data");
+        List<SessionInfo> out = new SessionPage(data == null ? 0 : data.length());
         if (data != null) for (int i = 0; i < data.length(); i++) {
             SessionInfo item = new SessionInfo(data.getJSONObject(i));
             if (!item.archived) out.add(item);
@@ -462,7 +481,8 @@ public class HermesApi implements AgentBackend {
                 String id = raw instanceof JSONObject ? ((JSONObject) raw).optString("id", "") : raw == null ? "" : String.valueOf(raw).trim();
                 if (id.isEmpty()) continue;
                 out.add(new ModelOption(slug, id,
-                        id.equalsIgnoreCase(currentModel) && slug.equalsIgnoreCase(currentProvider)));
+                        id.equalsIgnoreCase(currentModel) && slug.equalsIgnoreCase(currentProvider),
+                        raw instanceof JSONObject ? ((JSONObject) raw).optString("description", "") : ""));
             }
         }
         return out;
@@ -485,6 +505,7 @@ public class HermesApi implements AgentBackend {
         Result set(String sessionId, JSONObject fields);
         /** Extra {@code model_options} for the next run in this conversation, or null. */
         JSONObject runOptions(String sessionId);
+        default JSONObject usage(String sessionId, boolean refresh) throws Exception { throw new UnsupportedOperationException("Usage is unavailable"); }
     }
     volatile SettingsSource settingsSource;
 
@@ -507,6 +528,33 @@ public class HermesApi implements AgentBackend {
         } catch (Exception e) { return Result.error(friendly(e)); }
     }
 
+    @Override public JSONObject usage(String sid, boolean refresh) throws Exception {
+        String query = refresh ? "?refresh=1" : "";
+        if (supportsCommands()) return requestJson("GET", "/api/sessions/" + path(sid) + "/usage" + query, null);
+        String gateway = gatewayBase();
+        if (gateway != null) try {
+            return requestJson("GET", gateway + "/v1/usage?session_id=" + path(sid) + (refresh ? "&refresh=1" : ""), null);
+        } catch (Exception e) {
+            if (settingsSource == null) throw e;
+        }
+        if (settingsSource != null) return settingsSource.usage(sid, refresh);
+        throw new UnsupportedOperationException("Usage is unavailable");
+    }
+
+    @Override public Result resetUsage(String sid) {
+        if (!supportsCommands()) return Result.error("Use /usage reset through the Hermes hub");
+        try {
+            JSONObject result = requestJson("POST", "/api/sessions/" + path(sid) + "/usage/reset", new JSONObject());
+            return result.optBoolean("ok", true) ? Result.ok(result.optString("message", "Limit reset used")) : Result.error(result.optString("message", "Reset failed"));
+        } catch (Exception e) { return Result.error(friendly(e)); }
+    }
+
+    JSONObject gatewaySettings(String sid, boolean yolo) throws Exception {
+        String gateway = gatewayBase();
+        if (gateway == null) throw new UnsupportedOperationException("The gateway is unavailable");
+        return requestJson("POST", gateway + "/v1/settings", new JSONObject().put("session_id", sid).put("yolo", yolo));
+    }
+
     // ── messages ────────────────────────────────────────────────────────────────────────────────
 
     public List<Message> messages(String sessionId) throws Exception { return messages(sessionId, 120, 0); }
@@ -514,8 +562,18 @@ public class HermesApi implements AgentBackend {
     /** Newest-first page of {@code limit} messages starting {@code offset} back from the latest, returned oldest-first. */
     public List<Message> messages(String sessionId, int limit, int offset) throws Exception {
         JSONObject root = requestJson("GET", "/api/sessions/" + path(sessionId) + "/messages?limit=" + limit + "&offset=" + offset + "&order=latest", null);
-        return parseMessages(root.optJSONArray("data"));
+        JSONArray data = root.optJSONArray("data");
+        return new Page(parseMessages(data), data == null ? 0 : data.length());
     }
+
+    /** A parsed history page that remembers how many raw rows the server sent (parsing drops empty rows and merges tool results). */
+    public static final class Page extends ArrayList<Message> {
+        public final int raw;
+        Page(List<Message> parsed, int raw) { super(parsed); this.raw = raw; }
+    }
+
+    /** Raw server rows behind a history page; paging offsets and "is there more" must use this, not the parsed size. */
+    static int rawRows(List<Message> page) { return page instanceof Page ? ((Page) page).raw : page.size(); }
 
     static List<Message> parseMessages(JSONArray data) throws Exception {
         List<Message> out = new ArrayList<>();
@@ -592,6 +650,10 @@ public class HermesApi implements AgentBackend {
 
     /** POST /v1/artifacts/upload — raw bytes plus a filename header; returns the artifact id. */
     public String uploadArtifact(String filename, String mimeType, byte[] data) throws Exception {
+        return uploadArtifact(filename, mimeType, data, true);
+    }
+
+    private String uploadArtifact(String filename, String mimeType, byte[] data, boolean retryProxy) throws Exception {
         HttpURLConnection c = open("POST", "/v1/artifacts/upload");
         c.setRequestProperty("Content-Type", mimeType == null || mimeType.isEmpty() ? "application/octet-stream" : mimeType);
         c.setRequestProperty("X-Artifact-Filename", filename == null || filename.isEmpty() ? "file" : filename);
@@ -599,7 +661,15 @@ public class HermesApi implements AgentBackend {
         try (OutputStream out = c.getOutputStream()) { out.write(data); }
         int code = c.getResponseCode();
         String body = read(c, code);
-        if (code < 200 || code >= 300) throw new IllegalStateException(errorText(code, body));
+        if (code < 200 || code >= 300) {
+            String configured = UrlUtils.endpoint(base, "/v1/artifacts/upload");
+            boolean proxy = Reach.rejectProxy(configured, c.getURL(), code, body);
+            if (proxy && retryProxy && Reach.failover(configured)) {
+                c.disconnect();
+                return uploadArtifact(filename, mimeType, data, false);
+            }
+            throw new IllegalStateException(responseError(c, code, body));
+        }
         JSONObject o = new JSONObject(body);
         String id = o.optString("artifact_id", "");
         if (id.isEmpty()) {
@@ -638,12 +708,15 @@ public class HermesApi implements AgentBackend {
         Object[] hit = routeCache.get(base + "|" + sessionId);
         if (hit != null && System.currentTimeMillis() - (Long) hit[0] < 120_000) return (String[]) hit[1];
         String[] route = lookupRoute(sessionId);
+        if (route == LOOKUP_FAILED) return null;   // a transient failure must not pin "no model" for two minutes
         routeCache.put(base + "|" + sessionId, new Object[]{System.currentTimeMillis(), route});
         return route;
     }
 
     /** After anything that may re-pin models server-side (/model and other slash commands). */
     static void forgetRoutes() { routeCache.clear(); }
+
+    private static final String[] LOOKUP_FAILED = new String[0];
 
     private String[] lookupRoute(String sessionId) {
         try {
@@ -659,7 +732,7 @@ public class HermesApi implements AgentBackend {
                 if (provider.isEmpty()) provider = m.provider; else if (!provider.equals(m.provider)) { provider = ""; break; }
             }
             return new String[]{model, provider};
-        } catch (Exception e) { return null; }
+        } catch (Exception e) { return LOOKUP_FAILED; }
     }
 
     /**
@@ -671,13 +744,44 @@ public class HermesApi implements AgentBackend {
     static final int GATEWAY_PORT = 8797;
     boolean useGateway;
     private static volatile long gatewayDownUntil;
+    /** Why the last main-profile turn went to the API server instead of the gateway; null when it used the gateway. */
+    static volatile String gatewayFallback;
 
     String gatewayBase() {
-        if (!useGateway || System.currentTimeMillis() < gatewayDownUntil) return null;
+        return gatewayWanted() && System.currentTimeMillis() >= gatewayDownUntil ? gatewayRootOrNull() : null;
+    }
+
+    /** The gateway is on in Settings and this is the main profile (profiles under /p/ have no gateway platform). */
+    boolean gatewayWanted() { return useGateway && gatewayRootOrNull() != null; }
+
+    private String gatewayRootOrNull() {
+        try { return new URL(base).getPath().contains("/p/") ? null : gatewayRoot(); }
+        catch (Exception e) { return null; }
+    }
+
+    /** Plain words for why a gateway call failed, shown in the chat and in Settings. */
+    static String gatewayFallbackReason(Exception e) {
+        String m = e == null || e.getMessage() == null ? "" : e.getMessage();
+        if (m.startsWith("HTTP 401")) return "the gateway refused the app's API key";
+        if (m.startsWith("HTTP 404")) return "the Companion gateway plugin isn't installed or enabled on port " + GATEWAY_PORT;
+        if (e instanceof java.net.ConnectException) return "nothing answers on port " + GATEWAY_PORT + ": the Companion gateway plugin isn't running";
+        if (e instanceof java.net.SocketTimeoutException || e instanceof java.net.NoRouteToHostException || e instanceof java.net.UnknownHostException)
+            return "port " + GATEWAY_PORT + " is out of reach from this network (off Tailscale or a firewall)";
+        return m.isEmpty() ? "the gateway didn't answer" : m;
+    }
+
+    /** Checks the gateway now (off the UI thread): null when chats can use it, else why not. Success clears the backoff. */
+    String probeGateway() {
+        if (!useGateway) return "Chat through the gateway is off";
+        String root = gatewayRootOrNull();
+        if (root == null) return "profile chats use the API server; the gateway serves the main profile";
         try {
-            URL u = new URL(base);
-            return u.getPath().contains("/p/") ? null : gatewayRoot();
-        } catch (Exception e) { return null; }
+            JSONObject o = requestJson("GET", root + "/v1/capabilities", null);
+            if (!"companion".equals(o.optString("platform"))) return "something else answers on port " + GATEWAY_PORT;
+            gatewayDownUntil = 0;
+            gatewayFallback = null;
+            return null;
+        } catch (Exception e) { return gatewayFallbackReason(e); }
     }
 
     /** The gateway as configured (the primary host on its port); {@link Reach} swaps in whichever backup address answers. */
@@ -694,11 +798,10 @@ public class HermesApi implements AgentBackend {
     /** What {@link Reach} knows this run's server as, for failover. */
     private String runRoot(String runId) { String u = runUrl(runId, ""); return u.startsWith("http") ? u : UrlUtils.endpoint(base, u); }
 
-    private static boolean unreachable(Exception e) {
+    /** The gateway never saw the POST (safe to resend to the api_server). A read timeout may mean it did, so it is not. */
+    static boolean unreachable(Exception e) {
         String m = e.getMessage();
-        return e instanceof java.net.ConnectException || e instanceof java.net.SocketTimeoutException
-                || e instanceof java.net.UnknownHostException || e instanceof java.net.NoRouteToHostException
-                || (m != null && (m.startsWith("HTTP 404") || m.startsWith("HTTP 401")));
+        return Reach.isConnectFailure(e, "POST") || (m != null && (m.startsWith("HTTP 404") || m.startsWith("HTTP 401")));
     }
 
     /** Returns false only when the server has no /v1/runs, before anything reached the listener. */
@@ -716,16 +819,25 @@ public class HermesApi implements AgentBackend {
             if (options != null) body.put("model_options", options);
             if (handle != null && handle.cancelled) { listener.onError("Cancelled"); return true; }
             if (gateway != null) {
-                try { runId = clean(requestJson("POST", gateway + "/v1/runs", body).optString("run_id", "")); }
+                try { runId = clean(requestJson("POST", gateway + "/v1/runs", body).optString("run_id", "")); gatewayFallback = null; }
                 catch (Exception e) {
                     if (!unreachable(e)) throw e;
                     gatewayDownUntil = System.currentTimeMillis() + 60_000;
+                    gatewayFallback = gatewayFallbackReason(e);
                     if (!(input instanceof String)) return false;
                     runId = null;
                 }
             }
+            // Never degrade silently: say in the chat that this turn has no approval cards or questions, and why.
+            String why = gatewayFallback;
+            if (runId == null && why != null && gatewayWanted()) listener.onCommentary(fallbackNote(why));
             if (runId == null) runId = clean(requestJson("POST", "/v1/runs", body).optString("run_id", ""));
             if (runId.isEmpty()) throw new IllegalStateException("The server did not start a run");
+            if (handle != null && handle.cancelled) {   // Stop landed while the run was being created: nothing else will stop it
+                try { stopRun(runId); } catch (Exception ignored) {}
+                listener.onError("Cancelled");
+                return true;
+            }
         } catch (Exception e) {
             String m = e.getMessage();
             if (m != null && m.startsWith("HTTP 404") && !isSessionNotFound(m)) return false;
@@ -736,13 +848,18 @@ public class HermesApi implements AgentBackend {
         return true;
     }
 
+    static String fallbackNote(String why) {
+        return "Sent through the API server because " + why + ". Risky commands are refused instead of asking you, and Hermes "
+                + "can't ask questions. Settings › Server & hub › Gateway checks it and can repair it.";
+    }
+
     /** Streams an already running /v1/runs run (replaying what it did so far) until it ends. */
     public void followRun(String runId, StreamHandle handle, StreamListener listener) {
         listener.onRunStarted(runId);
         RunEvents state = new RunEvents();
         long lastSeq = -1, lastHeard = System.currentTimeMillis();
         int failures = 0;
-        boolean dropped = false;
+        boolean dropped = false, proxyRetried = false;
         while (true) {
             if (handle != null && handle.cancelled) { listener.onError("Cancelled"); return; }
             HttpURLConnection c = null;
@@ -755,9 +872,15 @@ public class HermesApi implements AgentBackend {
                 if (handle != null) { handle.connection = c; if (handle.cancelled) continue; }
                 int code = c.getResponseCode();
                 if (code == 404) { finishFromStatus(runId, state, listener); return; } // finished and forgotten
-                if (code < 200 || code >= 300) throw new java.io.IOException(errorText(code, read(c, code)));
+                if (code < 200 || code >= 300) {
+                    String response = read(c, code);
+                    boolean proxy = Reach.rejectProxy(runRoot(runId) + "/events", c.getURL(), code, response);
+                    if (proxy && !proxyRetried && Reach.failover(runRoot(runId))) { proxyRetried = true; continue; }
+                    if (proxy || code == 401 || code == 403) { listener.onError(responseError(c, code, response)); return; }
+                    throw new java.io.IOException(responseError(c, code, response));
+                }
                 if (dropped) { dropped = false; listener.onConnection(true); }
-                failures = 0;
+                boolean gotEvent = false;
                 StringBuilder payload = new StringBuilder();
                 try (BufferedReader r = new BufferedReader(new InputStreamReader(c.getInputStream(), StandardCharsets.UTF_8))) {
                     String line;
@@ -768,6 +891,7 @@ public class HermesApi implements AgentBackend {
                         JSONObject o;
                         try { o = new JSONObject(payload.toString()); } catch (Exception bad) { o = new JSONObject(); }
                         payload.setLength(0);
+                        gotEvent = true; failures = 0;
                         long seq = o.optLong("seq", -1);
                         if (seq >= 0 && seq <= lastSeq) continue; // already seen before the reconnect
                         if (seq >= 0) lastSeq = seq;
@@ -776,6 +900,14 @@ public class HermesApi implements AgentBackend {
                 }
                 // The server closed the stream without a terminal event we saw: ask how the run ended.
                 if (finishFromStatusIfDone(runId, state, listener)) return;
+                // A stream that closes without a single event (a proxy, an upstream bug) must back off and give up like an error.
+                if (!gotEvent) {
+                    failures++;
+                    if (System.currentTimeMillis() - lastHeard > 900_000) {
+                        listener.onError("The server keeps closing the live stream. Hermes may still be working; the reply will appear in the chat when it finishes.");
+                        return;
+                    }
+                }
             } catch (Exception e) {
                 if (handle != null && handle.cancelled) { listener.onError("Cancelled"); return; }
                 if (!dropped) { dropped = true; listener.onConnection(false); }
@@ -788,7 +920,7 @@ public class HermesApi implements AgentBackend {
                     return;
                 }
             } finally { if (c != null) c.disconnect(); }
-            try { Thread.sleep(Math.min(15_000, 500L << Math.min(5, failures))); }
+            try { long ms = Math.min(15_000, 500L << Math.min(5, failures)); if (handle != null) handle.sleep(ms); else Thread.sleep(ms); }
             catch (InterruptedException ie) { Thread.currentThread().interrupt(); listener.onError("Cancelled"); return; }
         }
     }
@@ -806,7 +938,10 @@ public class HermesApi implements AgentBackend {
     }
 
     private void finishFromStatus(String runId, RunEvents state, StreamListener listener) {
-        if (!finishFromStatusIfDone(runId, state, listener)) state.finish(listener);
+        if (finishFromStatusIfDone(runId, state, listener)) return;
+        if (state.streamed.length() == 0 && state.finalText.isEmpty() && state.outcome == null)
+            listener.onError("The server no longer has this run (it may have restarted). Check the chat; your message may need to be sent again.");
+        else state.finish(listener);
     }
 
     /** Folds /v1/runs events into the listener; the same names the session stream uses. */
@@ -825,6 +960,7 @@ public class HermesApi implements AgentBackend {
                     if (o.optBoolean("segment", false)) listener.onSegment(d); else listener.onDelta(d);
                     return false;
                 }
+                case "usage.updated": listener.onUsage(o); return false;
                 case "run.steered": listener.onSteer(clean(o.optString("text", ""))); return false;
                 case "message.interim": case "assistant.commentary":
                     if (!o.optBoolean("already_streamed", false)) listener.onCommentary(o.optString("text", ""));
@@ -843,7 +979,7 @@ public class HermesApi implements AgentBackend {
                     if (name.startsWith("tool.")) {
                         Object args = o.opt("args");
                         listener.onToolEvent(name.substring(5), clean(o.optString("tool_name", o.optString("tool", "tool"))),
-                                toolPreview(name, o), args == null || args == JSONObject.NULL ? "" : String.valueOf(args));
+                                toolPreview(name, o), args == null || args == JSONObject.NULL ? "" : String.valueOf(args), o.optString("item_id", ""));
                         return false;
                     }
                     if (name.startsWith("run.") && !"run.started".equals(name) && !"run.queued".equals(name)
@@ -868,6 +1004,10 @@ public class HermesApi implements AgentBackend {
     }
 
     private void streamSessionChat(String sessionId, Object input, String systemMessage, StreamHandle handle, StreamListener listener) {
+        streamSessionChat(sessionId, input, systemMessage, handle, listener, true);
+    }
+
+    private void streamSessionChat(String sessionId, Object input, String systemMessage, StreamHandle handle, StreamListener listener, boolean retryProxy) {
         HttpURLConnection c = null;
         String runId = null;
         boolean finished = false;
@@ -881,7 +1021,17 @@ public class HermesApi implements AgentBackend {
             byte[] data = body.toString().getBytes(StandardCharsets.UTF_8);
             try (OutputStream out = c.getOutputStream()) { out.write(data); }
             int code = c.getResponseCode();
-            if (code < 200 || code >= 300) { listener.onError(errorText(code, read(c, code))); return; }
+            if (code < 200 || code >= 300) {
+                String response = read(c, code);
+                String configured = UrlUtils.endpoint(base, "/api/sessions/" + path(sessionId) + "/chat/stream");
+                boolean proxy = Reach.rejectProxy(configured, c.getURL(), code, response);
+                if (proxy && retryProxy && Reach.failover(configured)) {
+                    c.disconnect();
+                    streamSessionChat(sessionId, input, systemMessage, handle, listener, false);
+                    return;
+                }
+                listener.onError(responseError(c, code, response)); return;
+            }
             String event = "message"; StringBuilder payload = new StringBuilder(); String finalText = "";
             RunOutcome outcome = null;
             boolean sawEnd = false;
@@ -905,6 +1055,7 @@ public class HermesApi implements AgentBackend {
                                     if (o.optBoolean("segment", false)) listener.onSegment(d); else listener.onDelta(d);
                                     break;
                                 }
+                                case "usage.updated": listener.onUsage(o); break;
                                 case "run.steered":
                                     listener.onSteer(clean(o.optString("text", "")));
                                     break;
@@ -942,7 +1093,7 @@ public class HermesApi implements AgentBackend {
                                     if (name.startsWith("tool.")) {
                                         Object args = o.opt("args");
                                         listener.onToolEvent(name.substring(5), clean(o.optString("tool_name", o.optString("tool", "tool"))),
-                                                toolPreview(name, o), args == null || args == JSONObject.NULL ? "" : String.valueOf(args));
+                                                toolPreview(name, o), args == null || args == JSONObject.NULL ? "" : String.valueOf(args), o.optString("item_id", ""));
                                     } else if (name.startsWith("run.") && !"run.started".equals(name) && !"run.queued".equals(name)
                                             && !"run.steered".equals(name) && !"run.stopping".equals(name)) {
                                         outcome = parseOutcome(name.substring(4), o, finalText);
@@ -1130,9 +1281,15 @@ public class HermesApi implements AgentBackend {
     private Object requestAny(String method, String endpoint, JSONObject body) throws Exception {
         try { return requestOnce(method, endpoint, body); }
         catch (java.io.IOException e) {
-            if (!Reach.isConnectFailure(e, method) || !Reach.failover(endpoint.startsWith("http") ? endpoint : UrlUtils.endpoint(base, endpoint))) throw e;
+            if (!(e instanceof ProxyRejectedException) && !Reach.isConnectFailure(e, method)) throw e;
+            if (!Reach.failover(endpoint.startsWith("http") ? endpoint : UrlUtils.endpoint(base, endpoint))) throw e;
             return requestOnce(method, endpoint, body);
         }
+    }
+
+    /** Distinct from transport failures: only a completed, non-JSON proxy denial permits replaying a write. */
+    private static final class ProxyRejectedException extends java.io.IOException {
+        ProxyRejectedException(String message) { super(message); }
     }
 
     private Object requestOnce(String method, String endpoint, JSONObject body) throws Exception {
@@ -1141,7 +1298,13 @@ public class HermesApi implements AgentBackend {
         if (body != null) { byte[] data = body.toString().getBytes(StandardCharsets.UTF_8); try (OutputStream out = c.getOutputStream()) { out.write(data); } }
         // No disconnect(): on Android it closes the socket, and keep-alive saves a TCP+TLS handshake per call.
         int code = c.getResponseCode(); String response = read(c, code);
-        if (code < 200 || code >= 300) throw new IllegalStateException(errorText(code, response));
+        if (code < 200 || code >= 300) {
+            if (Reach.rejectProxy(endpoint.startsWith("http") ? endpoint : UrlUtils.endpoint(base, endpoint), c.getURL(), code, response)) {
+                c.disconnect();
+                throw new ProxyRejectedException(responseError(c, code, response));
+            }
+            throw new IllegalStateException(responseError(c, code, response));
+        }
         String trim = response.trim();
         if (trim.isEmpty()) return new JSONObject();
         if (trim.startsWith("<")) throw new IllegalStateException("The server answered with a web page, not the Hermes API. Check the URL and port point at the Hermes API server.");
@@ -1199,8 +1362,16 @@ public class HermesApi implements AgentBackend {
     }
     private static String read(HttpURLConnection c, int code) throws Exception {
         InputStream stream = code >= 400 ? c.getErrorStream() : c.getInputStream(); if (stream == null) return "";
-        StringBuilder b = new StringBuilder(); try (BufferedReader r = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) { String line; while ((line = r.readLine()) != null && b.length() < 8_000_000) b.append(line).append('\n'); } return b.toString();
+        StringBuilder b = new StringBuilder(); try (BufferedReader r = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) { String line; while ((line = r.readLine()) != null) { if (b.length() >= 8_000_000) throw new IllegalStateException("The server's reply is too large to show (over 8 MB)"); b.append(line).append('\n'); } } return b.toString();
     }
+    private static String responseError(HttpURLConnection connection, int code, String body) {
+        String error = errorText(code, body);
+        if (code != 403) return error;
+        URL url = connection.getURL();
+        int port = url.getPort() < 0 ? url.getDefaultPort() : url.getPort();
+        return error + " (" + connection.getRequestMethod() + " " + url.getHost() + ":" + port + url.getPath() + ")";
+    }
+
     static String errorText(int code, String body) {
         try {
             JSONObject o = new JSONObject(body); Object e = o.opt("error");
@@ -1210,13 +1381,13 @@ public class HermesApi implements AgentBackend {
         } catch (Exception ignored) {}
         String b = body == null ? "" : body.trim();
         if (code == 401) return "HTTP 401: the API key was rejected";
-        if (code == 403) return "HTTP 403: the server refused this key" + (b.isEmpty() || b.startsWith("<") ? "" : " — " + b.substring(0, Math.min(b.length(), 200)));
+        if (code == 403) return "HTTP 403: access denied by the server or reverse proxy. In Settings › Connection, use an allowed LAN/Tailscale address and check Backup addresses, or ask the administrator to allow this API route." + (b.isEmpty() || b.startsWith("<") ? "" : " — " + b.substring(0, Math.min(b.length(), 200)));
         if (code == 404) return "HTTP 404: this URL has no Hermes API here. Check the host, port and any path prefix.";
         if (code == 502 || code == 503 || code == 504) return "HTTP " + code + ": a proxy in front of Hermes couldn't reach it — is the Hermes gateway running?";
         return "HTTP " + code + (b.isEmpty() ? "" : ": " + b.substring(0, Math.min(b.length(), 300)));
     }
     static boolean isSessionNotFound(String error) {
-        return error != null && error.startsWith("HTTP 404: Session not found: ");
+        return error != null && error.toLowerCase(java.util.Locale.ROOT).contains("session not found");
     }
     static String friendly(Exception e) {
         String m = e.getMessage();
@@ -1226,7 +1397,7 @@ public class HermesApi implements AgentBackend {
         if (e instanceof javax.net.ssl.SSLException) return "Secure connection failed (" + (m == null ? "TLS error" : m) + "). If the server uses plain HTTP, use an http:// URL";
         if (e instanceof java.net.NoRouteToHostException) return "No route to the server — are you on the right network or Tailscale?";
         if (e instanceof org.json.JSONException) return "The server's reply wasn't Hermes API JSON — check the URL points at the Hermes API server";
-        if (e instanceof IllegalStateException && m != null) return m;
+        if ((e instanceof IllegalStateException || e instanceof ProxyRejectedException) && m != null) return m;
         return e.getClass().getSimpleName() + (m == null || m.isEmpty() ? "" : ": " + m);
     }
 

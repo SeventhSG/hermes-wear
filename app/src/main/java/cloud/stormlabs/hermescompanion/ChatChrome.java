@@ -36,11 +36,11 @@ final class ChatChrome {
     /** Streaming follows the tail only while the reader is at it; scrolling up releases it. */
     static boolean followTail(boolean nearBottom, boolean userDragging) { return nearBottom && !userDragging; }
 
-    /** Assistant reading rhythm: 1.45 line height on running text (code and mono keep their own). Walks the tree once, at build time. */
+    /** Assistant reading rhythm: 1.5x line height on running text (code and mono keep their own). Walks the tree once, at build time. */
     static void rhythm(View v) {
         if (v instanceof TextView) {
             TextView t = (TextView) v;
-            if (t.getTypeface() == null || !t.getTypeface().equals(android.graphics.Typeface.MONOSPACE)) t.setLineSpacing(0, 1.45f);
+            if (t.getTypeface() == null || !t.getTypeface().equals(android.graphics.Typeface.MONOSPACE)) Ui.leading(t, 1.5f);
         } else if (v instanceof ViewGroup) {
             ViewGroup g = (ViewGroup) v;
             for (int i = 0; i < g.getChildCount(); i++) rhythm(g.getChildAt(i));
