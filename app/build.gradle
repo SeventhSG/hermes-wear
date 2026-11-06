@@ -1,0 +1,89 @@
+plugins { id 'com.android.application' }
+// Firebase push activates once app/google-services.json is added (Firebase console → Android app).
+if (file('google-services.json').exists()) apply plugin: 'com.google.gms.google-services'
+
+def releaseKeystore = System.getenv('HERMES_COMPANION_KEYSTORE')
+def releaseStorePassword = System.getenv('HERMES_COMPANION_STORE_PASSWORD')
+def releaseKeyAlias = System.getenv('HERMES_COMPANION_KEY_ALIAS')
+def releaseKeyPassword = System.getenv('HERMES_COMPANION_KEY_PASSWORD')
+def hasReleaseSigning = releaseKeystore && releaseStorePassword && releaseKeyAlias && releaseKeyPassword
+
+android {
+    namespace 'cloud.stormlabs.hermescompanion'
+    compileSdk 35
+
+    buildFeatures { aidl true; buildConfig true }
+
+    defaultConfig {
+        applicationId 'com.seventhsg.hermeswear' // must equal the watch app's id: the Wear Data Layer only links apps with the same id and signing key
+        minSdk 26
+        targetSdk 35
+        versionCode 162
+        versionName '7.77.0'
+        testInstrumentationRunner 'android.test.InstrumentationTestRunner'
+        ndk { abiFilters 'arm64-v8a' }
+        // Branding defaults from gradle.properties (brand.*), see the comment there.
+        def brand = { key, fallback -> (project.findProperty(key) ?: fallback).toString().trim() }
+        def brandHex = { key -> brand(key, '') ? '0xff' + brand(key, '').replace('#', '') : '0' }
+        manifestPlaceholders = [appLabel: brand('brand.label', 'Hermes')]
+        buildConfigField 'String', 'BRAND_NAME', '"' + brand('brand.name', '') + '"'
+        buildConfigField 'String', 'BRAND_THEME', '"' + brand('brand.theme', 'console') + '"'
+        buildConfigField 'int', 'BRAND_BACKGROUND', brandHex('brand.background')
+        buildConfigField 'int', 'BRAND_ACCENT', brandHex('brand.accent')
+    }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            release {
+                storeFile file(releaseKeystore)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (hasReleaseSigning) signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    sourceSets.main.assets.srcDirs += "$buildDir/generated/kit"
+}
+
+// The server kit ships inside the app so onboarding can hand it to Hermes to install (ServerSetup).
+// The zip holds server-kit/ (the installer and its modules) and bridge/ next to it, as in the repo.
+tasks.register('serverKitZip', Zip) {
+    from(rootProject.file('server-kit')) { into 'server-kit'; exclude '**/__pycache__/**', '**/*.orig', 'test_*.py' }
+    from(rootProject.file('bridge')) { into 'bridge'; exclude '**/__pycache__/**', 'test_*.py' }
+    archiveFileName = 'server-kit.zip'
+    destinationDirectory = file("$buildDir/generated/kit")
+}
+// The module list is also shipped on its own so the setup screen can show it without unzipping.
+tasks.register('serverKitManifest', Copy) {
+    from rootProject.file('server-kit/modules.json')
+    rename { 'server-kit-modules.json' }
+    into "$buildDir/generated/kit"
+}
+preBuild.dependsOn 'serverKitZip', 'serverKitManifest'
+
+
+dependencies {
+    implementation files('libs/sherpa-onnx-1.13.8.aar', 'libs/commons-compress-1.21.jar')
+    implementation 'org.jetbrains.kotlin:kotlin-stdlib:2.0.21' // sherpa-onnx Android API is Kotlin
+    implementation 'com.google.firebase:firebase-messaging:24.1.0' // push via FCM (FcmService)
+    implementation 'com.google.android.gms:play-services-wearable:19.0.0' // Wear OS relay (WearRelayService)
+    implementation 'dev.rikka.shizuku:api:13.1.5'      // hidden agent display (AgentDisplay)
+    implementation 'dev.rikka.shizuku:provider:13.1.5'
+    testImplementation files('libs/junit4-4.13.2.jar', 'libs/hamcrest-2.2.jar')
+    testImplementation 'org.json:json:20240303' // android.jar stubs org.json for JVM unit tests
+}

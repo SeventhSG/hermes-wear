@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# hermes-notify "title" "body" [type] [priority] [session_id]
+# Sends a notification to the phone via the hermes-hub (HERMES_HUB, default http://127.0.0.1:8791).
+set -euo pipefail
+
+TITLE="${1:?usage: hermes-notify TITLE BODY [TYPE] [PRIORITY] [SESSION_ID]}"
+BODY="${2:?usage: hermes-notify TITLE BODY [TYPE] [PRIORITY] [SESSION_ID]}"
+TYPE="${3:-info}"
+PRIORITY="${4:-3}"
+SESSION_ID="${5:-}"
+
+ENV_FILE="${HERMES_ENV:-$HOME/.hermes/.env}"
+HUB="${HERMES_HUB:-http://127.0.0.1:8791}"
+API_SERVER_KEY="$(grep -m1 "^API_SERVER_KEY=" "$ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d "\"'" || true)"
+if [ -z "$API_SERVER_KEY" ]; then
+    echo "hermes-notify: could not read API_SERVER_KEY from $ENV_FILE" >&2
+    exit 1
+fi
+
+python3 - "$TITLE" "$BODY" "$TYPE" "$PRIORITY" "$API_SERVER_KEY" "$SESSION_ID" "$HUB" <<'PYEOF'
+import json, sys, urllib.request
+title, body, type_, priority, key, session_id, hub = sys.argv[1:8]
+event = {"title": title, "body": body, "type": type_, "priority": int(priority)}
+if session_id:
+    event["session_id"] = session_id  # tapping the notification opens that conversation
+payload = json.dumps(event).encode()
+req = urllib.request.Request(
+    hub.rstrip("/") + "/notify", data=payload, method="POST",
+    headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+)
+with urllib.request.urlopen(req, timeout=10) as resp:
+    sys.stdout.write(resp.read().decode())
+    sys.stdout.write("\n")
+PYEOF

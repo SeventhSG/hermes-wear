@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="AppTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:statusBarColor">#080A0F</item>
+        <item name="android:navigationBarColor">#080A0F</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:colorAccent">#5A9CF4</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowAnimationStyle">@style/ScreenMotion</item>
+    </style>
+    <!-- UI concepts (Ui.legacyWindowInsets applies them at runtime; colours come from Concept). -->
+    <style name="AppTheme.Paper" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:statusBarColor">#FBF9F5</item>
+        <item name="android:navigationBarColor">#F7F4EE</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:colorAccent">#2F6FD6</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowAnimationStyle">@style/ScreenMotion</item>
+    </style>
+    <style name="ScreenMotion">
+        <item name="android:activityOpenEnterAnimation">@anim/screen_open_enter</item>
+        <item name="android:activityOpenExitAnimation">@anim/screen_open_exit</item>
+        <item name="android:activityCloseEnterAnimation">@anim/screen_close_enter</item>
+        <item name="android:activityCloseExitAnimation">@anim/screen_close_exit</item>
+    </style>
+    <style name="SheetMotion">
+        <item name="android:windowEnterAnimation">@anim/sheet_enter</item>
+        <item name="android:windowExitAnimation">@anim/sheet_exit</item>
+    </style>
+    <style name="TranslucentMotion" parent="android:style/Theme.Translucent.NoTitleBar">
+        <item name="android:windowAnimationStyle">@style/ScreenMotion</item>
+    </style>
+    <style name="MediaFade">
+        <item name="android:activityOpenEnterAnimation">@android:anim/fade_in</item>
+        <item name="android:activityCloseExitAnimation">@android:anim/fade_out</item>
+    </style>
+    <style name="MediaViewer" parent="android:style/Theme.Translucent.NoTitleBar">
+        <item name="android:windowAnimationStyle">@style/MediaFade</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+    </style>
+</resources>

@@ -10,3 +10,4 @@ build/
 .env
 .env.*
 .claude/
+app/google-services.json

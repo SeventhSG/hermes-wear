@@ -1,0 +1,19 @@
+[Unit]
+Description=Codex remote for Hermes Companion (bridge to the local Codex app-server daemon)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=HOME=@HOME@
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=@PATH@
+# CODEX_BRIDGE_TOKEN, CODEX_BRIDGE_HOST and CODEX_BRIDGE_PORT; codex-rc writes this file on first run.
+EnvironmentFile=-@HERMES_HOME@/secrets/codex-bridge.env
+ExecStartPre=-@CODEX_BIN@ app-server daemon start
+ExecStart=@PYTHON@ @BRIDGE_DIR@/codex_bridge.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=@WANTED_BY@
