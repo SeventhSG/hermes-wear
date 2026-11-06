@@ -81,6 +81,7 @@ dependencies {
     implementation files('libs/sherpa-onnx-1.13.8.aar', 'libs/commons-compress-1.21.jar')
     implementation 'org.jetbrains.kotlin:kotlin-stdlib:2.0.21' // sherpa-onnx Android API is Kotlin
     implementation 'com.google.firebase:firebase-messaging:24.1.0' // push via FCM (FcmService)
+    implementation 'com.google.android.gms:play-services-wearable:19.0.0' // Wear OS relay (WearRelayService)
     implementation 'dev.rikka.shizuku:api:13.1.5'      // hidden agent display (AgentDisplay)
     implementation 'dev.rikka.shizuku:provider:13.1.5'
     testImplementation files('libs/junit4-4.13.2.jar', 'libs/hamcrest-2.2.jar')

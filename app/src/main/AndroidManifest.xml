@@ -171,6 +171,14 @@
     </intent-filter>
 </activity>
 
+<!-- Wear OS companion: the watch app sends prompts here and gets the streamed reply back. -->
+<service android:name=".WearRelayService" android:exported="true">
+    <intent-filter>
+        <action android:name="com.google.android.gms.wearable.MESSAGE_RECEIVED" />
+        <data android:scheme="wear" android:host="*" android:pathPrefix="/hermes/" />
+    </intent-filter>
+</service>
+
 <service
     android:name=".RunService"
     android:exported="false"

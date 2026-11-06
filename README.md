@@ -277,3 +277,14 @@ Hermes server you chose. See [PRIVACY.md](PRIVACY.md).
 ## License
 
 [MIT](LICENSE) © Hermes Companion contributors.
+
+## Wear OS companion (fork addition)
+
+`wear/` is a small Wear OS app that asks Hermes by voice and shows the streamed reply, with Allow once / Deny for approvals.
+The watch never holds the server URL or key. It sends the prompt to the phone app over the Wear Data Layer, and
+`WearRelayService` runs the turn on the phone's current connection (in a conversation titled "Watch") and streams the reply back.
+
+- Build both: `./gradlew :app:assembleDebug :wear:assembleDebug`
+- The two APKs share one application id and must be signed with the same key, or the watch and phone will not see each other.
+- Needs Wear OS 3+ (API 30), a paired phone running the app, and a speech recognizer on the watch for dictation.
+- Not done yet: tiles and complications, notifications on the watch, standalone mode without the phone.
