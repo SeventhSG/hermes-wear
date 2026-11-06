@@ -7,8 +7,12 @@ final class Onboarding {
 
     private Onboarding() { }
 
-    /** Only a fresh install (no key yet) that has not finished or skipped the tour sees it. */
-    static boolean shouldRun(String apiKey, boolean done) { return !done && (apiKey == null || apiKey.isEmpty()); }
+    /**
+     * Hermes Bridge skips the welcome tour: its "Connect your server" page was followed by the connection
+     * form, so a fresh install showed the same step twice. A missing key goes straight to the form instead
+     * (MainActivity opens ConnectionActivity when there is no key).
+     */
+    static boolean shouldRun(String apiKey, boolean done) { return false; }
 
     /** Page after moving by delta, kept inside the tour. */
     static int move(int page, int delta) { return Math.max(0, Math.min(PAGES - 1, page + delta)); }

@@ -4,9 +4,9 @@ import static org.junit.Assert.*;
 import org.junit.Test;
 
 public class OnboardingTest {
-    @Test public void onlyFreshInstallsSeeTheTour() {
-        assertTrue(Onboarding.shouldRun("", false));
-        assertTrue(Onboarding.shouldRun(null, false));
+    @Test public void bridgeNeverShowsTheTour() {
+        assertFalse(Onboarding.shouldRun("", false));
+        assertFalse(Onboarding.shouldRun(null, false));
         assertFalse(Onboarding.shouldRun("", true));
         assertFalse(Onboarding.shouldRun("key", false));
     }
