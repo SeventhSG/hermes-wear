@@ -34,7 +34,7 @@ Download the APK from [Releases](../../releases), then sideload it:
 
 ```
 adb connect <watch-ip>:<port>
-adb install hermes-wear-0.2.0.apk
+adb install hermes-wear-7.77.0.apk
 ```
 
 Enter the server on the watch (**Server**), or set it from your PC:

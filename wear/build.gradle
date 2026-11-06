@@ -19,8 +19,8 @@ android {
         applicationId 'com.seventhsg.hermeswear'
         minSdk 30
         targetSdk 35
-        versionCode 2
-        versionName '0.2.0'
+        versionCode 162
+        versionName '7.77.0'
     }
 
     signingConfigs {
