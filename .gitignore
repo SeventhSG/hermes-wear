@@ -2,19 +2,11 @@
 .idea/
 local.properties
 *.iml
-app/build/
 build/
 *.apk
-
-.hermes/
+*.aab
 *.jks
 *.keystore
 .env
 .env.*
-__pycache__/
-
-# Local agent worktrees
 .claude/
-
-# Firebase config per developer/project (see docs/HANDOFF.md)
-app/google-services.json

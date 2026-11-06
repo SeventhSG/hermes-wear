@@ -1,15 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-feature android:name="android.hardware.type.watch" />
+    <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- Cleartext is allowed because a self-hosted Hermes is often plain http on a LAN or tunnel. -->
     <application
         android:allowBackup="false"
+        android:usesCleartextTraffic="true"
         android:label="Hermes"
         android:theme="@android:style/Theme.DeviceDefault">
         <uses-library android:name="com.google.android.wearable" android:required="true" />
-        <meta-data android:name="com.google.android.wearable.standalone" android:value="false" />
+        <meta-data android:name="com.google.android.wearable.standalone" android:value="true" />
 
-        <activity android:name=".WatchActivity" android:exported="true">
+        <activity android:name=".WatchActivity" android:exported="true" android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

@@ -1,5 +1,0 @@
-# One systemd unit name per line. Only listed units appear in the app's Ops screen and can be restarted (Docker containers are also readable for logs).
-hermes-gateway
-hermes-hub
-# my-web-app
-# my-database
